@@ -43,7 +43,7 @@ Two `64×64`-tile maps that wrap and scroll independently:
 - The BG0 tile map lives in VRAM at offset `$10000`. Each map cell is **4 bytes**:
   tile index (11 bits), palette sub-palette, h/v flip, and priority.
 
-(The Snake and PALMBLAST examples drive the background; Pong is sprites-only.)
+(The Snake and PalmBlast examples drive the background; Pong is sprites-only.)
 
 ## Sprites (OAM)
 

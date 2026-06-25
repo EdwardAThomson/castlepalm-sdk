@@ -15,7 +15,7 @@ const embedCart = (file, title) => Buffer.from(
 ).toString('base64')
 const pongB64 = embedCart('pong.asm', 'PONG')
 const snakeB64 = embedCart('snake.asm', 'SNAKE')
-const palmblastB64 = embedCart('palmblast.asm', 'PALMBLAST')
+const palmblastB64 = embedCart('palmblast.asm', 'PalmBlast')
 
 // module id -> source file (id mirrors the path so relative requires resolve)
 const FILES = {
