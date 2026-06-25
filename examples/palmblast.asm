@@ -66,6 +66,10 @@ alcx     EQU $000220   ; AI cell history: the cell occupied last frame
 alcy     EQU $000221
 aprx     EQU $000222   ; AI cell history: the previous cell (don't backtrack into it)
 apry     EQU $000223
+arsd     EQU $000224   ; AI run-to-safety: probe direction
+arsx     EQU $000225   ; AI run-to-safety: probe cell x/y
+arsy     EQU $000226
+arstep   EQU $000227   ; AI run-to-safety: steps remaining
 ; --- DETQ: same-frame chain work queue (ring of bomb-slot indices) ---
 DETQ     EQU $000120   ; 8 bytes, bomb-slot indices pending detonation
 detHead  EQU $000128   ; u8 dequeue index (mod 8)
@@ -1539,6 +1543,11 @@ ai_cellkind:
   LDB R0, [A0]
   CMP R0, #0
   BNE ack_block
+  LDA A0, #FIREAT
+  ADD A0, R2
+  LDB R0, [A0]
+  CMP R0, #0
+  BNE ack_block        ; active fire on a floor cell -> treat as blocked
   MOV R0, #0
   RET
 ack_soft:
@@ -1682,8 +1691,7 @@ a2_r:
   STW R0, [P1IN]
   RET
 a2_n:
-  MOV R0, #0
-  STW R0, [P1IN]
+  CALL ai_runflee        ; no immediate/L dodge -> run straight out of the blast
   RET
 
 ; ai_leadsafe(R4=cx,R5=cy) -> R0 (1 if that cell is free AND has a safe neighbour)
@@ -1747,6 +1755,97 @@ ai_wokcell:
   RET
 awk_no:
   MOV R0, #0
+  RET
+
+; ai_runsafe(R0=dir) -> R0 (1 if a safe cell is reachable within 3 free steps along dir).
+; Matches ai_canescape's straight-run check so a bombed crate's blast can be outrun.
+ai_runsafe:
+  STB R0, [arsd]
+  LDB R0, [amx]
+  STB R0, [arsx]
+  LDB R0, [amy]
+  STB R0, [arsy]
+  MOV R0, #3
+  STB R0, [arstep]
+ars_lp:
+  LDB R0, [arsd]
+  LDB R4, [arsx]
+  LDB R5, [arsy]
+  CMP R0, #UP
+  BNE ars_nd
+  SUB R5, #1
+  BRA ars_st
+ars_nd:
+  CMP R0, #DOWN
+  BNE ars_nl
+  ADD R5, #1
+  BRA ars_st
+ars_nl:
+  CMP R0, #LEFT
+  BNE ars_nr
+  SUB R4, #1
+  BRA ars_st
+ars_nr:
+  ADD R4, #1
+ars_st:
+  STB R4, [arsx]
+  STB R5, [arsy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ars_no            ; blocked -> can't run this way
+  LDB R4, [arsx]
+  LDB R5, [arsy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ars_yes           ; reached a safe cell
+  LDB R0, [arstep]
+  SUB R0, #1
+  STB R0, [arstep]
+  CMP R0, #0
+  BNE ars_lp
+ars_no:
+  MOV R0, #0
+  RET
+ars_yes:
+  MOV R0, #1
+  RET
+
+; ai_runflee: flee by running straight toward safety (used when no immediate/L dodge).
+ai_runflee:
+  MOV R0, #UP
+  CALL ai_runsafe
+  CMP R0, #0
+  BEQ arf_d
+  MOV R0, #UP
+  STW R0, [P1IN]
+  RET
+arf_d:
+  MOV R0, #DOWN
+  CALL ai_runsafe
+  CMP R0, #0
+  BEQ arf_l
+  MOV R0, #DOWN
+  STW R0, [P1IN]
+  RET
+arf_l:
+  MOV R0, #LEFT
+  CALL ai_runsafe
+  CMP R0, #0
+  BEQ arf_r
+  MOV R0, #LEFT
+  STW R0, [P1IN]
+  RET
+arf_r:
+  MOV R0, #RIGHT
+  CALL ai_runsafe
+  CMP R0, #0
+  BEQ arf_n
+  MOV R0, #RIGHT
+  STW R0, [P1IN]
+  RET
+arf_n:
+  MOV R0, #0
+  STW R0, [P1IN]
   RET
 
 ; ai_wander: roam to a SAFE neighbour that is NOT the cell we came from (so we keep
@@ -1917,19 +2016,22 @@ atd_h:
   CMP R0, #0
   BNE atd_bl
   CALL ai_cellkind
-  CMP R0, #0
-  BEQ atd_move         ; free floor -> move
   CMP R0, #1
-  BNE atd_bl           ; wall / pillar / bomb -> blocked, go around
-  CALL ai_canescape    ; crate -> bomb it only if we can dodge the blast
+  BEQ atd_crate        ; crate -> maybe bomb through it
   CMP R0, #0
-  BEQ atd_bl
-  MOV R0, #ABTN
+  BNE atd_bl           ; wall / pillar / bomb -> blocked, go around
+  CALL aidanger        ; free floor: never chase into a live blast or fire
+  CMP R0, #0
+  BNE atd_bl
+  LDB R0, [aidir]
   STW R0, [P1IN]
   MOV R0, #1
   RET
-atd_move:
-  LDB R0, [aidir]
+atd_crate:
+  CALL ai_canescape    ; bomb the crate only if we can dodge the blast
+  CMP R0, #0
+  BEQ atd_bl
+  MOV R0, #ABTN
   STW R0, [P1IN]
   MOV R0, #1
   RET
@@ -2021,7 +2123,7 @@ ace_dr:
   ADD R5, #1
   CALL ai_safecell
   CMP R0, #0
-  BEQ ace_done
+  BEQ ace_run
   LDB R4, [amx]
   ADD R4, #1
   LDB R5, [amy]
@@ -2033,8 +2135,93 @@ ace_dr:
   ADD R5, #1
   CALL ai_safecell
   CMP R0, #0
-  BEQ ace_done
+  BEQ ace_run
 ace_s4:
+  MOV R0, #1
+  STB R0, [acef]
+ace_run:
+  ; straight-run escapes: 3 free cells in a line lets us outrun a range-2 blast
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rl
+  LDB R4, [amx]
+  ADD R4, #2
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rl
+  LDB R4, [amx]
+  ADD R4, #3
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rl
+  MOV R0, #1
+  STB R0, [acef]
+ace_rl:
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_ru
+  LDB R4, [amx]
+  SUB R4, #2
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_ru
+  LDB R4, [amx]
+  SUB R4, #3
+  LDB R5, [amy]
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_ru
+  MOV R0, #1
+  STB R0, [acef]
+ace_ru:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rd
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #2
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rd
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #3
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_rd
+  MOV R0, #1
+  STB R0, [acef]
+ace_rd:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_done
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #2
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_done
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #3
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE ace_done
   MOV R0, #1
   STB R0, [acef]
 ace_done:
