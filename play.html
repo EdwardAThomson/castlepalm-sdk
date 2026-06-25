@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CastlePalm — play a cart</title>
+<style>
+  html,body{height:100%;margin:0;background:#15161b;color:#cdd2da;font:14px system-ui,sans-serif;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px}
+  #bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+  select,.load{background:#2a2c34;color:#e8eaf0;border:1px solid #454852;border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit}
+  .load input{display:none}
+  canvas{image-rendering:pixelated;background:#000;border-radius:4px;width:min(96vw,960px);height:auto;touch-action:none}
+  #keys{opacity:.6;font-size:12px;text-align:center}
+  kbd{background:#23252c;border:1px solid #3a3d46;border-radius:4px;padding:1px 5px;font:11px ui-monospace,monospace}
+</style>
+
+<div id="bar">
+  <select id="cart">
+    <option value="pong">Pong</option>
+    <option value="snake">Snake</option>
+    <option value="palmblast">PALMBLAST</option>
+  </select>
+  <label class="load">Load .cpc… <input type="file" id="file" accept=".cpc,.cplm,application/octet-stream"></label>
+  <span id="now"></span>
+</div>
+
+<canvas id="s" width="320" height="224"></canvas>
+<div id="keys">
+  Move <kbd>← ↑ → ↓</kbd> / <kbd>WASD</kbd> · <kbd>Z</kbd>A <kbd>X</kbd>B <kbd>C</kbd>X <kbd>V</kbd>Y · <kbd>Enter</kbd> Start
+  · drag a <code>.cpc</code> onto the screen
+</div>
+
+<script src="dist/castlepalm.js"></script>
+<script>
+'use strict'
+const W = 320, H = 224
+const cv = document.getElementById('s')
+const ctx = cv.getContext('2d', { alpha: false })
+const image = ctx.createImageData(W, H)
+const out = new Uint32Array(image.data.buffer)
+const sel = document.getElementById('cart'), now = document.getElementById('now')
+let sys = null, input = 0
+
+function boot(bytes) { sys = new CastlePalm.System(bytes) }
+function pick(name) { if (window.CastlePalm && CastlePalm.carts[name]) { boot(CastlePalm.carts[name]); sel.value = name; now.textContent = '' } }
+sel.onchange = () => pick(sel.value)
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return
+  const r = new FileReader(); r.onload = () => { boot(new Uint8Array(r.result)); now.textContent = '▸ ' + f.name }; r.readAsArrayBuffer(f)
+}
+cv.ondragover = e => e.preventDefault()
+cv.ondrop = e => { e.preventDefault(); const r = new FileReader(); r.onload = () => boot(new Uint8Array(r.result)); r.readAsArrayBuffer(e.dataTransfer.files[0]) }
+
+// input bitmask: U1 D2 L4 R8 A16 B32 X64 Y128 Start256
+const MAP = { ArrowUp:1, w:1, ArrowDown:2, s:2, ArrowLeft:4, a:4, ArrowRight:8, d:8, z:16, x:32, c:64, v:128, Enter:256 }
+onkeydown = e => { const b = MAP[e.key]; if (b) { e.preventDefault(); input |= b } }
+onkeyup   = e => { const b = MAP[e.key]; if (b) { e.preventDefault(); input &= ~b } }
+
+if (window.CastlePalm && CastlePalm.carts) pick('pong')
+else now.textContent = 'bundle not found — run "node tools/bundle.js"'
+
+// fixed 60 Hz step (don't run faster on 120Hz displays)
+let acc = 0, last
+function frame(t) {
+  requestAnimationFrame(frame)
+  if (!sys) return
+  if (last === undefined) last = t
+  acc += t - last; last = t
+  if (acc > 250) acc = 250
+  let drew = false
+  while (acc >= 16.6667) { acc -= 16.6667; sys.setInput(input); out.set(sys.runFrame()); drew = true }
+  if (drew) ctx.putImageData(image, 0, 0)
+}
+requestAnimationFrame(frame)
+</script>
+</html>

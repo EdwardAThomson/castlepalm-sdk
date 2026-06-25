@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+# build artifacts from the examples / your carts
+*.cpc
+examples/*.png
+template/*.png
+*.local.md

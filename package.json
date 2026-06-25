@@ -1,0 +1,13 @@
+{
+  "name": "castlepalm-sdk",
+  "version": "1.0.0",
+  "description": "SDK for the CastlePalm fantasy 16-bit console: write games in assembly, build .cpc cartridges, and run them.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node tools/build-cart.js",
+    "run": "node tools/run.js",
+    "bundle": "node tools/bundle.js",
+    "disasm": "node tools/disasm.js"
+  }
+}
