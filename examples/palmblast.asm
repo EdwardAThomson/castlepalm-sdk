@@ -51,6 +51,17 @@ P1IN     EQU $00010C   ; sampled INPUT1 this frame
 P0IN_PR  EQU $00010E   ; previous-frame INPUT0 (A-button edge detect)
 P1IN_PR  EQU $000110   ; previous-frame INPUT1
 sfxT     EQU $000112   ; sound-effect countdown (frames)
+aimode   EQU $000114   ; 0 = 2 players, 1 = 1 player (P1 driven by the AI)
+amx      EQU $000116   ; AI scratch: my cx
+amy      EQU $000117   ; AI scratch: my cy
+aox      EQU $000118   ; AI scratch: opponent cx
+aoy      EQU $000119   ; AI scratch: opponent cy
+aip      EQU $00011A   ; AI primary chase dir
+ais      EQU $00011B   ; AI secondary chase dir
+aidir    EQU $00011C   ; AI dir being tried
+acef     EQU $00011D   ; AI escape-check accumulator
+acx2     EQU $00011E   ; AI scratch: neighbour cell being probed
+acy2     EQU $00011F
 ; --- DETQ: same-frame chain work queue (ring of bomb-slot indices) ---
 DETQ     EQU $000120   ; 8 bytes, bomb-slot indices pending detonation
 detHead  EQU $000128   ; u8 dequeue index (mod 8)
@@ -243,12 +254,27 @@ mainloop:
   LDW R0, [state]
   CMP R0, #1
   BEQ ml_play
-  ; TITLE or OVER: wait for Start (either pad) to begin a fresh round
+  ; TITLE or OVER: A = 1 player (vs AI), B = 2 players, Start = 1 player
   LDW R0, [P0IN]
-  LDW R1, [P1IN]
-  OR R0, R1
-  AND R0, #START
+  MOV R2, R0
+  AND R2, #ABTN          ; A -> 1 player
+  BEQ ml_nA
+  MOV R2, #1
+  STW R2, [aimode]
+  BRA ml_begin
+ml_nA:
+  MOV R2, R0
+  AND R2, #32            ; B -> 2 players
+  BEQ ml_nB
+  MOV R2, #0
+  STW R2, [aimode]
+  BRA ml_begin
+ml_nB:
+  AND R0, #START         ; Start -> 1 player (default)
   BEQ ml_wait
+  MOV R2, #1
+  STW R2, [aimode]
+ml_begin:
   CALL newround
   MOV R0, #200           ; round-start chirp
   MOV R1, #8
@@ -258,6 +284,7 @@ ml_play:
   CALL clearfire
   CALL tickflames
   CALL tickbombs
+  CALL aithink           ; 1-player mode: AI writes P1IN before P1 reads it
   CALL movep0
   CALL movep1
   CALL dropbombs
@@ -1276,15 +1303,672 @@ fp_x:
   RET
 
 ; ---- TITLE screen: clear board, big PALMBLAST + PUSH START ----
+; ================= single-player AI: drives P1 as a virtual controller =================
+; Writes P1IN each frame in 1-player mode. Priority: flee live blasts/fire, bomb when
+; lined up with the opponent (only with an escape), else chase; bomb crates in the way.
+aithink:
+  LDW R0, [aimode]
+  CMP R0, #0
+  BNE ait_on
+  RET                     ; 2-player: leave P1IN = human INPUT1
+ait_on:
+  LDB R0, [P1]            ; AI alive?
+  CMP R0, #0
+  BNE ait_live
+  MOV R0, #0
+  STW R0, [P1IN]
+  RET
+ait_live:
+  LDB R0, [P1+7]
+  STB R0, [amx]
+  LDB R0, [P1+8]
+  STB R0, [amy]
+  LDB R0, [P0+7]
+  STB R0, [aox]
+  LDB R0, [P0+8]
+  STB R0, [aoy]
+  LDB R4, [amx]           ; in danger on my own cell? -> flee
+  LDB R5, [amy]
+  CALL aidanger
+  CMP R0, #0
+  BEQ ait_safe
+  CALL aiflee
+  RET
+ait_safe:
+  LDB R0, [amy]           ; same row as opponent?
+  LDB R1, [aoy]
+  CMP R0, R1
+  BNE ait_ckcol
+  LDB R0, [amx]
+  LDB R1, [aox]
+  SUB R0, R1
+  CALL ai_abs
+  CMP R0, #RANGE
+  BLE ait_wantbomb
+ait_ckcol:
+  LDB R0, [amx]           ; same column as opponent?
+  LDB R1, [aox]
+  CMP R0, R1
+  BNE ait_chase
+  LDB R0, [amy]
+  LDB R1, [aoy]
+  SUB R0, R1
+  CALL ai_abs
+  CMP R0, #RANGE
+  BLE ait_wantbomb
+  BRA ait_chase
+ait_wantbomb:
+  CALL ai_canescape
+  CMP R0, #0
+  BEQ ait_chase          ; no diagonal escape -> don't self-trap
+  MOV R0, #ABTN
+  STW R0, [P1IN]
+  RET
+ait_chase:
+  CALL ai_movetoward
+  RET
+
+; ai_abs(R0) -> |R0|
+ai_abs:
+  CMP R0, #0
+  BGE aab_p
+  NEG R0
+aab_p:
+  RET
+
+; aidanger(R4=cx,R5=cy) -> R0 (1 if live fire here, or reachable by a bomb blast)
+aidanger:
+  MOV R2, R5
+  SHL R2, #4
+  ADD R2, R4
+  LDA A0, #FIREAT
+  ADD A0, R2
+  LDB R0, [A0]
+  CMP R0, #0
+  BEQ adg_b
+  MOV R0, #1
+  RET
+adg_b:
+  LDA A1, #BOMBS
+  MOV R7, #8
+adg_lp:
+  LDB R0, [A1]
+  CMP R0, #0
+  BEQ adg_nx
+  LDB R2, [A1+#2]       ; bomb cx
+  LDB R3, [A1+#3]       ; bomb cy
+  CALL ai_inblast
+  CMP R0, #0
+  BNE adg_dg
+adg_nx:
+  MOV R6, #8
+  ADD A1, R6
+  SUB R7, #1
+  BNE adg_lp
+  MOV R0, #0
+  RET
+adg_dg:
+  MOV R0, #1
+  RET
+
+; ai_inblast(R2=bcx,R3=bcy, R4=cx,R5=cy) -> R0 (1 if cell reached by bomb blast;
+;   blast stops at the first solid cell). Preserves R4,R5,R7,A1.
+ai_inblast:
+  CMP R2, R4
+  BNE aib_ns
+  CMP R3, R5
+  BEQ aib_yes
+aib_ns:
+  CMP R3, R5           ; same row?
+  BNE aib_col
+  MOV R0, R4
+  SUB R0, R2
+  CALL ai_abs
+  CMP R0, #RANGE
+  BGT aib_no
+  CMP R4, R2
+  BLT aib_rneg
+  MOV R6, #1
+  BRA aib_rw
+aib_rneg:
+  MOV R6, #1
+  NEG R6
+aib_rw:
+  MOV R1, R2
+aib_rwl:
+  ADD R1, R6
+  CMP R1, R4
+  BEQ aib_yes
+  MOV R0, R5
+  SHL R0, #4
+  ADD R0, R1
+  LDA A0, #WORLD
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R0, #FLOOR
+  BNE aib_no
+  BRA aib_rwl
+aib_no:
+  MOV R0, #0
+  RET
+aib_yes:
+  MOV R0, #1
+  RET
+aib_col:
+  CMP R2, R4           ; same column?
+  BNE aib_no2
+  MOV R0, R5
+  SUB R0, R3
+  CALL ai_abs
+  CMP R0, #RANGE
+  BGT aib_no2
+  CMP R5, R3
+  BLT aib_cneg
+  MOV R6, #1
+  BRA aib_cw
+aib_cneg:
+  MOV R6, #1
+  NEG R6
+aib_cw:
+  MOV R1, R3
+aib_cwl:
+  ADD R1, R6
+  CMP R1, R5
+  BEQ aib_yes2
+  MOV R0, R1
+  SHL R0, #4
+  ADD R0, R4
+  LDA A0, #WORLD
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R0, #FLOOR
+  BNE aib_no2
+  BRA aib_cwl
+aib_no2:
+  MOV R0, #0
+  RET
+aib_yes2:
+  MOV R0, #1
+  RET
+
+; ai_cellkind(R4=cx,R5=cy) -> R0 (0 free floor, 1 soft crate, 2 blocked/oob)
+ai_cellkind:
+  CMP R4, #0
+  BLT ack_block
+  CMP R4, #GCOLS
+  BGE ack_block
+  CMP R5, #0
+  BLT ack_block
+  CMP R5, #GROWS
+  BGE ack_block
+  MOV R2, R5
+  SHL R2, #4
+  ADD R2, R4
+  LDA A0, #WORLD
+  ADD A0, R2
+  LDB R0, [A0]
+  CMP R0, #SOFT
+  BEQ ack_soft
+  CMP R0, #FLOOR
+  BNE ack_block
+  LDA A0, #BOMBAT
+  ADD A0, R2
+  LDB R0, [A0]
+  CMP R0, #0
+  BNE ack_block
+  MOV R0, #0
+  RET
+ack_soft:
+  MOV R0, #1
+  RET
+ack_block:
+  MOV R0, #2
+  RET
+
+; ai_safecell(R4,R5) -> R0 (1 if free floor AND not dangerous)
+ai_safecell:
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE asc_no
+  CALL aidanger
+  CMP R0, #0
+  BNE asc_no
+  MOV R0, #1
+  RET
+asc_no:
+  MOV R0, #0
+  RET
+
+; ai_hasescape -> R0 (1 if any neighbour of my cell is safe to flee to)
+ai_hasescape:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ahe_y
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ahe_y
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ahe_y
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ahe_y
+  MOV R0, #0
+  RET
+ahe_y:
+  MOV R0, #1
+  RET
+
+; aiflee: set P1IN to the first safe neighbour (else wander)
+aiflee:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ afl_d
+  MOV R0, #UP
+  STW R0, [P1IN]
+  RET
+afl_d:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ afl_l
+  MOV R0, #DOWN
+  STW R0, [P1IN]
+  RET
+afl_l:
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ afl_r
+  MOV R0, #LEFT
+  STW R0, [P1IN]
+  RET
+afl_r:
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ afl_x
+  MOV R0, #RIGHT
+  STW R0, [P1IN]
+  RET
+afl_x:
+  CALL aiflee2step
+  RET
+
+; aiflee2step: no neighbour is safe right now, but step toward a free neighbour that
+; itself has a safe neighbour (a 2-step dodge out of the blast). Else stay put.
+aiflee2step:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_leadsafe
+  CMP R0, #0
+  BEQ a2_d
+  MOV R0, #UP
+  STW R0, [P1IN]
+  RET
+a2_d:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_leadsafe
+  CMP R0, #0
+  BEQ a2_l
+  MOV R0, #DOWN
+  STW R0, [P1IN]
+  RET
+a2_l:
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_leadsafe
+  CMP R0, #0
+  BEQ a2_r
+  MOV R0, #LEFT
+  STW R0, [P1IN]
+  RET
+a2_r:
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_leadsafe
+  CMP R0, #0
+  BEQ a2_n
+  MOV R0, #RIGHT
+  STW R0, [P1IN]
+  RET
+a2_n:
+  MOV R0, #0
+  STW R0, [P1IN]
+  RET
+
+; ai_leadsafe(R4=cx,R5=cy) -> R0 (1 if that cell is free AND has a safe neighbour)
+ai_leadsafe:
+  CALL ai_cellkind
+  CMP R0, #0
+  BNE als_no
+  STB R4, [acx2]
+  STB R5, [acy2]
+  LDB R4, [acx2]
+  LDB R5, [acy2]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BNE als_yes
+  LDB R4, [acx2]
+  LDB R5, [acy2]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BNE als_yes
+  LDB R4, [acx2]
+  SUB R4, #1
+  LDB R5, [acy2]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE als_yes
+  LDB R4, [acx2]
+  ADD R4, #1
+  LDB R5, [acy2]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE als_yes
+als_no:
+  MOV R0, #0
+  RET
+als_yes:
+  MOV R0, #1
+  RET
+
+; ai_wander: move to any SAFE neighbour (free + not in a blast); else stay put.
+; Using safe (not just free) cells stops the AI wandering back into its own bomb.
+ai_wander:
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ awn_l
+  MOV R0, #RIGHT
+  STW R0, [P1IN]
+  RET
+awn_l:
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ awn_u
+  MOV R0, #LEFT
+  STW R0, [P1IN]
+  RET
+awn_u:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ awn_d
+  MOV R0, #UP
+  STW R0, [P1IN]
+  RET
+awn_d:
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ awn_n
+  MOV R0, #DOWN
+  STW R0, [P1IN]
+  RET
+awn_n:
+  MOV R0, #0
+  STW R0, [P1IN]
+  RET
+
+; ai_movetoward: chase the opponent on the dominant axis (try other axis, then wander)
+ai_movetoward:
+  LDB R0, [aox]
+  LDB R1, [amx]
+  SUB R0, R1            ; dx
+  LDB R2, [aoy]
+  LDB R3, [amy]
+  SUB R2, R3            ; dy
+  MOV R4, #0            ; hdir
+  CMP R0, #0
+  BEQ amt_h0
+  BLT amt_hl
+  MOV R4, #RIGHT
+  BRA amt_h0
+amt_hl:
+  MOV R4, #LEFT
+amt_h0:
+  MOV R5, #0            ; vdir
+  CMP R2, #0
+  BEQ amt_v0
+  BLT amt_vu
+  MOV R5, #DOWN
+  BRA amt_v0
+amt_vu:
+  MOV R5, #UP
+amt_v0:
+  CMP R0, #0            ; |dx|
+  BGE amt_dxp
+  NEG R0
+amt_dxp:
+  CMP R2, #0            ; |dy|
+  BGE amt_dyp
+  NEG R2
+amt_dyp:
+  CMP R0, R2
+  BLT amt_vpri
+  STB R4, [aip]        ; horizontal dominant
+  STB R5, [ais]
+  BRA amt_go
+amt_vpri:
+  STB R5, [aip]        ; vertical dominant
+  STB R4, [ais]
+amt_go:
+  LDB R0, [aip]
+  CMP R0, #0
+  BEQ amt_sec
+  CALL ai_trydir
+  CMP R0, #0
+  BNE amt_ret
+amt_sec:
+  LDB R0, [ais]
+  CMP R0, #0
+  BEQ amt_wan
+  CALL ai_trydir
+  CMP R0, #0
+  BNE amt_ret
+amt_wan:
+  CALL ai_wander
+amt_ret:
+  RET
+
+; ai_trydir(R0=dir): move that way if free; bomb a crate there if escapable. R0=1 if acted.
+ai_trydir:
+  STB R0, [aidir]
+  LDB R4, [amx]
+  LDB R5, [amy]
+  CMP R0, #UP
+  BNE atd_nd
+  SUB R5, #1
+  BRA atd_h
+atd_nd:
+  CMP R0, #DOWN
+  BNE atd_nl
+  ADD R5, #1
+  BRA atd_h
+atd_nl:
+  CMP R0, #LEFT
+  BNE atd_nr
+  SUB R4, #1
+  BRA atd_h
+atd_nr:
+  ADD R4, #1
+atd_h:
+  CALL ai_cellkind
+  CMP R0, #0
+  BEQ atd_move         ; free floor -> move
+  CMP R0, #1
+  BNE atd_bl           ; wall / pillar / bomb -> blocked, go around
+  CALL ai_canescape    ; crate -> bomb it only if we can dodge the blast
+  CMP R0, #0
+  BEQ atd_bl
+  MOV R0, #ABTN
+  STW R0, [P1IN]
+  MOV R0, #1
+  RET
+atd_move:
+  LDB R0, [aidir]
+  STW R0, [P1IN]
+  MOV R0, #1
+  RET
+atd_bl:
+  MOV R0, #0
+  RET
+
+; ai_canescape -> R0 (1 if a bomb at my cell can be dodged: a safe diagonal cell is
+;   reachable via a safe orthogonal step; diagonals are off the bomb's blast cross)
+ai_canescape:
+  MOV R0, #0
+  STB R0, [acef]
+  ; up-left
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_ur
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ace_s1
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_ur
+ace_s1:
+  MOV R0, #1
+  STB R0, [acef]
+ace_ur:
+  ; up-right
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_dl
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ace_s2
+  LDB R4, [amx]
+  LDB R5, [amy]
+  SUB R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_dl
+ace_s2:
+  MOV R0, #1
+  STB R0, [acef]
+ace_dl:
+  ; down-left
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_dr
+  LDB R4, [amx]
+  SUB R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ace_s3
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_dr
+ace_s3:
+  MOV R0, #1
+  STB R0, [acef]
+ace_dr:
+  ; down-right
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_done
+  LDB R4, [amx]
+  ADD R4, #1
+  LDB R5, [amy]
+  CALL ai_safecell
+  CMP R0, #0
+  BNE ace_s4
+  LDB R4, [amx]
+  LDB R5, [amy]
+  ADD R5, #1
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ ace_done
+ace_s4:
+  MOV R0, #1
+  STB R0, [acef]
+ace_done:
+  LDB R0, [acef]
+  RET
+
 drawtitle:
   CALL clearbg
   MOV R4, #11           ; PALMBLAST: 9 glyphs * 2 = 18 wide, centred (40-18)/2
   MOV R5, #8
   LDA A1, #str_title
   CALL print16
-  MOV R4, #15           ; PUSH START: 10 glyphs * 2 = 20; (40-20)/2
+  MOV R4, #10           ; "A 1 PLAYER" (vs AI)
   MOV R5, #16
-  LDA A1, #str_push
+  LDA A1, #str_solo
+  CALL print16
+  MOV R4, #10           ; "B 2 PLAYER"
+  MOV R5, #20
+  LDA A1, #str_duo
   CALL print16
   ; little arena vignette: crate, pillar, crate (16x16 cell blocks)
   MOV R4, #16
@@ -1367,6 +2051,10 @@ dgo_push:
 ; --- glyph strings (0-25 = A-Z, 26 = space, 27-36 = 0-9, $FF = end) ---
 str_title:
   DB 15,0,11,12,1,11,0,18,19,$FF             ; PALMBLAST
+str_solo:
+  DB 0,26,28,26,15,11,0,24,4,17,$FF          ; A 1 PLAYER
+str_duo:
+  DB 1,26,29,26,15,11,0,24,4,17,$FF          ; B 2 PLAYER
 str_push:
   DB 15,20,18,7,26,18,19,0,17,19,$FF         ; PUSH START
 str_over:
