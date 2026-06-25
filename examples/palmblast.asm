@@ -62,6 +62,10 @@ aidir    EQU $00011C   ; AI dir being tried
 acef     EQU $00011D   ; AI escape-check accumulator
 acx2     EQU $00011E   ; AI scratch: neighbour cell being probed
 acy2     EQU $00011F
+alcx     EQU $000220   ; AI cell history: the cell occupied last frame
+alcy     EQU $000221
+aprx     EQU $000222   ; AI cell history: the previous cell (don't backtrack into it)
+apry     EQU $000223
 ; --- DETQ: same-frame chain work queue (ring of bomb-slot indices) ---
 DETQ     EQU $000120   ; 8 bytes, bomb-slot indices pending detonation
 detHead  EQU $000128   ; u8 dequeue index (mod 8)
@@ -1327,6 +1331,25 @@ ait_live:
   STB R0, [aox]
   LDB R0, [P0+8]
   STB R0, [aoy]
+  ; cell-history shift: on entering a new cell, remember the one we left
+  LDB R0, [amx]
+  LDB R1, [alcx]
+  CMP R0, R1
+  BNE ah_chg
+  LDB R0, [amy]
+  LDB R1, [alcy]
+  CMP R0, R1
+  BEQ ah_same
+ah_chg:
+  LDB R0, [alcx]
+  STB R0, [aprx]
+  LDB R0, [alcy]
+  STB R0, [apry]
+  LDB R0, [amx]
+  STB R0, [alcx]
+  LDB R0, [amy]
+  STB R0, [alcy]
+ah_same:
   LDB R4, [amx]           ; in danger on my own cell? -> flee
   LDB R5, [amy]
   CALL aidanger
@@ -1701,13 +1724,39 @@ als_yes:
   MOV R0, #1
   RET
 
-; ai_wander: move to any SAFE neighbour (free + not in a blast); else stay put.
-; Using safe (not just free) cells stops the AI wandering back into its own bomb.
+; ai_isprev(R4=cx,R5=cy) -> R0 (1 if this is the previous cell). Preserves R4,R5.
+ai_isprev:
+  LDB R0, [aprx]
+  CMP R0, R4
+  BNE aip_no
+  LDB R0, [apry]
+  CMP R0, R5
+  BNE aip_no
+  MOV R0, #1
+  RET
+aip_no:
+  MOV R0, #0
+  RET
+
+; ai_wokcell(R4,R5) -> R0 (1 if safe AND not the previous cell)
+ai_wokcell:
+  CALL ai_isprev
+  CMP R0, #0
+  BNE awk_no
+  CALL ai_safecell
+  RET
+awk_no:
+  MOV R0, #0
+  RET
+
+; ai_wander: roam to a SAFE neighbour that is NOT the cell we came from (so we keep
+; exploring instead of oscillating). If only the previous cell is open, back out of
+; the dead-end through it; if nothing is safe, stay put.
 ai_wander:
   LDB R4, [amx]
   ADD R4, #1
   LDB R5, [amy]
-  CALL ai_safecell
+  CALL ai_wokcell
   CMP R0, #0
   BEQ awn_l
   MOV R0, #RIGHT
@@ -1717,7 +1766,7 @@ awn_l:
   LDB R4, [amx]
   SUB R4, #1
   LDB R5, [amy]
-  CALL ai_safecell
+  CALL ai_wokcell
   CMP R0, #0
   BEQ awn_u
   MOV R0, #LEFT
@@ -1727,7 +1776,7 @@ awn_u:
   LDB R4, [amx]
   LDB R5, [amy]
   SUB R5, #1
-  CALL ai_safecell
+  CALL ai_wokcell
   CMP R0, #0
   BEQ awn_d
   MOV R0, #UP
@@ -1737,13 +1786,46 @@ awn_d:
   LDB R4, [amx]
   LDB R5, [amy]
   ADD R5, #1
-  CALL ai_safecell
+  CALL ai_wokcell
   CMP R0, #0
-  BEQ awn_n
+  BEQ awn_back
   MOV R0, #DOWN
   STW R0, [P1IN]
   RET
-awn_n:
+awn_back:
+  ; dead-end: back out toward the previous cell if it is safe
+  LDB R4, [aprx]
+  CMP R4, #$FF
+  BEQ awn_stay
+  LDB R5, [apry]
+  CALL ai_safecell
+  CMP R0, #0
+  BEQ awn_stay
+  LDB R0, [aprx]         ; prev is adjacent; pick the dir toward it
+  LDB R1, [amx]
+  CMP R0, R1
+  BLT awn_bl
+  BGT awn_br
+  LDB R0, [apry]
+  LDB R1, [amy]
+  CMP R0, R1
+  BLT awn_bu
+  MOV R0, #DOWN
+  STW R0, [P1IN]
+  RET
+awn_bu:
+  MOV R0, #UP
+  STW R0, [P1IN]
+  RET
+awn_bl:
+  MOV R0, #LEFT
+  STW R0, [P1IN]
+  RET
+awn_br:
+  MOV R0, #RIGHT
+  STW R0, [P1IN]
+  RET
+awn_stay:
   MOV R0, #0
   STW R0, [P1IN]
   RET
@@ -1831,6 +1913,9 @@ atd_nl:
 atd_nr:
   ADD R4, #1
 atd_h:
+  CALL ai_isprev       ; don't chase back into the cell we just left
+  CMP R0, #0
+  BNE atd_bl
   CALL ai_cellkind
   CMP R0, #0
   BEQ atd_move         ; free floor -> move
@@ -2100,6 +2185,11 @@ newround:
   STW R0, [P1+2]
   MOV R0, #168
   STW R0, [P1+4]
+  MOV R0, #$FF          ; reset AI cell history (no backtrack target yet)
+  STB R0, [alcx]
+  STB R0, [alcy]
+  STB R0, [aprx]
+  STB R0, [apry]
   MOV R0, #2
   STW R0, [aliveCnt]
   MOV R0, #0
