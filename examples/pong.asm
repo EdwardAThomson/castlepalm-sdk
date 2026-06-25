@@ -42,6 +42,7 @@ scoreR EQU $00010E
 gover  EQU $000110
 sfxT   EQU $000112
 started EQU $000114        ; 0 = title screen, 1 = playing
+diff    EQU $000116        ; 0=easy 1=normal 2=hard (AI paddle speed = diff+1)
 
   ORG $300000
   DA start
@@ -134,8 +135,29 @@ sfxidle:
   CMP R0, #0
   BNE sf_run
   LDW R0, [INPUT]
-  AND R0, #START
+  MOV R1, R0
+  AND R1, #16          ; A = easy
+  BEQ sf_nA
+  MOV R1, #0
+  BRA sf_go
+sf_nA:
+  MOV R1, R0
+  AND R1, #32          ; B = normal
+  BEQ sf_nB
+  MOV R1, #1
+  BRA sf_go
+sf_nB:
+  MOV R1, R0
+  AND R1, #64          ; X = hard
+  BEQ sf_nX
+  MOV R1, #2
+  BRA sf_go
+sf_nX:
+  AND R0, #START       ; Start = normal (default)
   BEQ sf_title
+  MOV R1, #1
+sf_go:
+  STW R1, [diff]
   MOV R0, #1
   STW R0, [started]
   CALL resetgame
@@ -185,15 +207,18 @@ lclo:
 lchi:
   STW R2, [padLY]
 
-  ; ---- right paddle AI ----
+  ; ---- right paddle AI (speed = diff+1; tracks ball centre) ----
+  LDW R4, [diff]
+  ADD R4, #1           ; aispd = 1 (easy) / 2 (normal) / 3 (hard)
   LDW R2, [padRY]
   LDW R3, [ballY]
+  SUB R3, #12          ; aim paddle centre at ball centre
   CMP R2, R3
   BGE aiup
-  ADD R2, #2
+  ADD R2, R4
   BRA aiclamp
 aiup:
-  SUB R2, #2
+  SUB R2, R4
 aiclamp:
   CMP R2, #0
   BGE rclo
@@ -268,6 +293,21 @@ bbot:
   MOV R0, #30
   MOV R1, #4
   CALL sfx
+  ; english: hit near the paddle top/bottom -> steep ball you can aim
+  LDW R1, [ballY]
+  LDW R2, [padLY]
+  SUB R1, R2           ; rel = ball top - paddle top (0..32 within the paddle)
+  CMP R1, #10
+  BGE lp_nt
+  MOV R1, #3           ; top third -> steep up
+  NEG R1
+  STW R1, [ballVY]
+  BRA lpno
+lp_nt:
+  CMP R1, #22
+  BLE lpno             ; middle -> keep current angle
+  MOV R1, #3           ; bottom third -> steep down
+  STW R1, [ballVY]
 lpno:
 
   ; ---- right paddle collision ----
@@ -490,10 +530,19 @@ ti_rp:
   MOV R5, #48
   LDA A1, #str_pong
   CALL prtext
-  ; "PUSH START"
-  MOV R4, #80
-  MOV R5, #150
-  LDA A1, #str_push
+  ; difficulty menu — tap A / B / X (or Start = normal)
+  MOV R3, #$10
+  MOV R4, #112
+  MOV R5, #148
+  LDA A1, #str_easy
+  CALL prtext
+  MOV R4, #96
+  MOV R5, #172
+  LDA A1, #str_norm
+  CALL prtext
+  MOV R4, #112
+  MOV R5, #196
+  LDA A1, #str_hard
   CALL prtext
   RET
 
@@ -518,8 +567,12 @@ pt_done:
 
 str_pong:
   DB 15,14,13,6,$FF                   ; PONG
-str_push:
-  DB 15,20,18,7,26,18,19,0,17,19,$FF  ; PUSH START
+str_easy:
+  DB 0,26,4,0,18,24,$FF               ; A EASY
+str_norm:
+  DB 1,26,13,14,17,12,0,11,$FF        ; B NORMAL
+str_hard:
+  DB 23,26,7,0,17,3,$FF               ; X HARD
 
 ; --- 16x16 4bpp digit font, tiles 16.. (4 tiles/digit, generated) ---
 digitdata:
