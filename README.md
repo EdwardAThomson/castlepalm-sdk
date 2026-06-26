@@ -45,13 +45,27 @@ node tools/run.js mygame.asm 60 shot.png --start
 Builds the cart, runs 60 frames (tapping **Start** first to skip a title screen),
 and saves a screenshot. Fast feedback while you iterate.
 
+## Make art (PNG → tiles)
+
+Draw a sprite or tile in any pixel editor (≤16 colours), then convert it to
+cart-ready 4bpp tiles + a palette:
+
+```sh
+node tools/png2tiles.js ship.png --name ship --size 16 --bank 1
+```
+
+This writes `ship.bin` (tile bytes), `ship.pal.asm` (the RGB555 palette), and
+`ship.json`. In your cart, `INCBIN "ship.bin"` to load the tiles and apply the
+palette routine — no more hand-packing nibbles. See **`docs/MAKING_ART.md`** for
+the full workflow.
+
 ## What's in here
 
 | Path | What |
 | --- | --- |
 | `examples/` | `hello.asm` (start here), plus `pong.asm`, `snake.asm`, `palmblast.asm` |
 | `template/game.asm` | copy this to start a new cart |
-| `tools/` | `build-cart` (.asm → .cpc), `run` (build + screenshot), `bundle`, `disasm` |
+| `tools/` | `build-cart` (.asm → .cpc), `run` (build + screenshot), `png2tiles` (PNG → tiles), `bundle`, `disasm` |
 | `play.html` | a tiny browser shell to play a `.cpc` locally |
 | `docs/` | the machine — read **`GOTCHAS.md` first** |
 

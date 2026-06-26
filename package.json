@@ -8,6 +8,7 @@
     "build": "node tools/build-cart.js",
     "run": "node tools/run.js",
     "bundle": "node tools/bundle.js",
-    "disasm": "node tools/disasm.js"
+    "disasm": "node tools/disasm.js",
+    "assets": "node tools/png2tiles.js"
   }
 }
