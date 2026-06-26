@@ -59,6 +59,14 @@ This writes `ship.bin` (tile bytes), `ship.pal.asm` (the RGB555 palette), and
 palette routine — no more hand-packing nibbles. See **`docs/MAKING_ART.md`** for
 the full workflow.
 
+## Build with an AI assistant
+
+Want Claude (or any capable model) to help you write carts? Hand it
+**[`tools/castlepalm_ai_skill.md`](tools/castlepalm_ai_skill.md)** as a system prompt
+or agent skill. It's a self-contained brief on the CPU, PPU, MMIO, memory map, the
+gotchas, and the build commands, so the model writes valid CastlePalm assembly instead
+of guessing. It points back at these docs for anything it needs to look up.
+
 ## What's in here
 
 | Path | What |
@@ -66,6 +74,7 @@ the full workflow.
 | `examples/` | `hello.asm` (start here), plus `pong.asm`, `snake.asm`, `palmblast.asm` |
 | `template/game.asm` | copy this to start a new cart |
 | `tools/` | `build-cart` (.asm → .cpc), `run` (build + screenshot), `png2tiles` (PNG → tiles), `bundle`, `disasm` |
+| `tools/castlepalm_ai_skill.md` | a system-prompt brief so an AI can help you write carts |
 | `play.html` | a tiny browser shell to play a `.cpc` locally |
 | `docs/` | the machine — read **`GOTCHAS.md` first** |
 
