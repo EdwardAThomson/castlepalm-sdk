@@ -298,7 +298,10 @@ function classify(mnem, ops) {
   throw new Error('unknown mnemonic ' + mnem)
 }
 
-function assemble(source, { origin = 0x300000 } = {}) {
+// readBinary(relPath) -> bytes lets `INCBIN "file"` embed a raw binary at the current
+// address. It is injected by the Node build tools (build-cart/bundle); the browser
+// never assembles INCBIN carts, so asm.js itself stays filesystem-free.
+function assemble(source, { origin = 0x300000, readBinary = null } = {}) {
   const symbols = new Map()
   const labelLine = new Map()    // label -> first-definition line (duplicate detection)
   const records = []             // {type, ...}
@@ -332,6 +335,15 @@ function assemble(source, { origin = 0x300000 } = {}) {
         records.push({ type: 'data', width, items, size: items.length * width, line: ln })
         return
       }
+      if (mnem === 'INCBIN') {
+        const m = /^"([^"]*)"$/.exec(rest)
+        if (!m) { err(ln, 'INCBIN expects a quoted path, e.g. INCBIN "art/ship.bin"'); return }
+        if (typeof readBinary !== 'function') { err(ln, 'INCBIN is unavailable here (no binary reader provided to the assembler)'); return }
+        let bytes
+        try { bytes = Uint8Array.from(readBinary(m[1])) } catch (e) { err(ln, `INCBIN cannot read "${m[1]}": ${e.message}`); return }
+        records.push({ type: 'incbin', bytes, size: bytes.length, line: ln })
+        return
+      }
       const { isaName, build } = classify(mnem, splitOps(rest))
       records.push({ type: 'instr', isaName, build, size: isa.lengthOf(isa.instr(isaName).opcode), line: ln })
     } catch (e) { err(ln, e.message) }   // skip the bad line; keep collecting
@@ -359,6 +371,10 @@ function assemble(source, { origin = 0x300000 } = {}) {
       } else if (r.type === 'data') {
         let p = r.addr
         for (const it of r.items) { let v = resolve(it, symbols); for (let b = 0; b < r.width; b++) { mem.set(p++, v & 0xff); v >>= 8 } }
+        lineMap.set(r.addr, r.line)
+      } else if (r.type === 'incbin') {
+        let p = r.addr
+        for (const b of r.bytes) mem.set(p++, b & 0xff)
         lineMap.set(r.addr, r.line)
       }
     } catch (e) { err(r.line, e.message) }
@@ -646,8 +662,8 @@ function parseCart(bytes) {
 }
 
 // assemble .asm source straight into a cartridge image
-function buildCart(source, { title = '' } = {}) {
-  const r = assemble(source)
+function buildCart(source, { title = '', readBinary = null } = {}) {
+  const r = assemble(source, { readBinary })
   return makeCart({ image: r.image, origin: r.origin, title })
 }
 

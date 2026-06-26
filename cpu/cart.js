@@ -54,8 +54,8 @@ function parseCart(bytes) {
 }
 
 // assemble .asm source straight into a cartridge image
-function buildCart(source, { title = '' } = {}) {
-  const r = assemble(source)
+function buildCart(source, { title = '', readBinary = null } = {}) {
+  const r = assemble(source, { readBinary })
   return makeCart({ image: r.image, origin: r.origin, title })
 }
 

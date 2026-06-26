@@ -10,8 +10,9 @@ const root = path.join(__dirname, '..')
 
 // embed cartridges so the shell runs from file:// with no fetch
 const { buildCart } = require(path.join(root, 'cpu', 'cart.js'))
+const examplesDir = path.join(root, 'examples')
 const embedCart = (file, title) => Buffer.from(
-  buildCart(fs.readFileSync(path.join(root, 'examples', file), 'utf8'), { title })
+  buildCart(fs.readFileSync(path.join(examplesDir, file), 'utf8'), { title, readBinary: rel => fs.readFileSync(path.resolve(examplesDir, rel)) })
 ).toString('base64')
 const pongB64 = embedCart('pong.asm', 'PONG')
 const snakeB64 = embedCart('snake.asm', 'SNAKE')
