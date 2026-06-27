@@ -19,11 +19,15 @@ const path = require('path')
 const T = {
   BLANK: 0,
   BRICK: 1, SIDEWALK: 2, ROAD: 3, CURB: 4, HP_FULL: 5, HP_EMPTY: 6, WIN_TILE: 7,
+  WPN_ICON: 8, BHP_FULL: 9,                   // 8x8 HUD: armed icon, boss-bar cell
   PL_WALKA: 16, PL_WALKB: 20, PL_PUNCH: 24,   // player 16x16 frames (4 tiles each)
   EN_WALKA: 32, EN_WALKB: 36,                 // enemy 16x16 frames
+  WEAPON: 40, FOOD: 44, BOSS: 48,             // pickups + boss (16x16 each)
+  WEAPON_UP: 52,                              // pipe mid-swing (raised diagonal)
   FONT: 64,                                   // FONT + (letter 0..25)
+  DIGIT: 96,                                  // DIGIT + (0..9)
 }
-const SHEET_TILES = 96            // tiles 0..95 -> 96*32 = 3072 bytes
+const SHEET_TILES = 112           // tiles 0..111 -> 112*32 = 3584 bytes
 const sheet = new Uint8Array(SHEET_TILES * 32)
 
 const put = (idx, bytes) => sheet.set(bytes, idx * 32)
@@ -83,6 +87,17 @@ put(T.CURB, tile8([
 ], BG))
 put(T.HP_FULL, tile8(['gggggggg','gggggggg','gggggggg','gggggggg','gggggggg','gggggggg','gggggggg','gggggggg'], BG))
 put(T.HP_EMPTY, tile8(['eeeeeeee','eeeeeeee','eeeeeeee','eeeeeeee','eeeeeeee','eeeeeeee','eeeeeeee','eeeeeeee'], BG))
+put(T.WPN_ICON, tile8([    // little grey pipe, drawn in BG colour 8 (mortar grey)
+  '        ',
+  '        ',
+  ' mmmmmm ',
+  ' m    m ',
+  ' mmmmmm ',
+  '        ',
+  '        ',
+  '        ',
+], BG))
+put(T.BHP_FULL, tile8(['%%%%%%%%','%%%%%%%%','%%%%%%%%','%%%%%%%%','%%%%%%%%','%%%%%%%%','%%%%%%%%','%%%%%%%%'], BG))  // boss-bar cell (BG colour 2)
 
 // ---- player 16x16 (faces RIGHT; the cart hflips for left) ----
 // . transparent  o outline  s skin  b shirt  p pants  w white
@@ -182,28 +197,126 @@ put16(T.EN_WALKB, tile16([
   '................',
 ], EMAP))
 
+// ---- pickups 16x16 (palette bank 5: 1 pipe-light, 2 pipe-dark, 3 meat, 4 bone) ----
+const WMAP = { '.': 0, 'L': 1, 'D': 2 }
+put16(T.WEAPON, tile16([           // a chrome lead pipe with a dark centre line
+  '................',
+  '................',
+  '................',
+  '.....LLLLLLLLL..',
+  '....LLLLLLLLLLL.',
+  '....LDDDDDDDDDL.',
+  '....LLLLLLLLLLL.',
+  '.....LLLLLLLLL..',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+], WMAP))
+put16(T.WEAPON_UP, tile16([        // pipe raised on the diagonal: the swing wind-up
+  '............LL..',
+  '...........LLL..',
+  '..........LLDL..',
+  '.........LLDL...',
+  '........LLDL....',
+  '.......LLDL.....',
+  '......LLDL......',
+  '.....LLDL.......',
+  '....LLDL........',
+  '...LLDL.........',
+  '..LLDL..........',
+  '..LLL...........',
+  '..LL............',
+  '................',
+  '................',
+  '................',
+], WMAP))
+const FDMAP = { '.': 0, 'M': 3, 'B': 4 }
+put16(T.FOOD, tile16([             // a chicken drumstick: round meat over a bone
+  '................',
+  '.......MMMM.....',
+  '......MMMMMM....',
+  '.....MMMMMMMM...',
+  '.....MMMMMMMM...',
+  '.....MMMMMMMM...',
+  '......MMMMMM....',
+  '.......MMMM.....',
+  '........MM......',
+  '........BB......',
+  '........BB......',
+  '.......BBBB.....',
+  '.......BBBB.....',
+  '................',
+  '................',
+  '................',
+], FDMAP))
+
+// ---- boss 16x16 (palette bank 6: 1 body, 2 dark, 3 skin, 4 white). Horned brute. ----
+const BSMAP = { '.': 0, 'R': 1, 'D': 2, 'K': 3, 'W': 4 }
+put16(T.BOSS, tile16([
+  '..D........D....',
+  '..DD......DD....',
+  '...DDDDDDDD.....',
+  '..DKKKKKKKKD....',
+  '..DKWKKKKWKD....',
+  '..DKKKKKKKKD....',
+  '..DDKKKKKKDD....',
+  '...DDDDDDDD.....',
+  '..DRRRRRRRRD....',
+  '.DRRRRRRRRRRD...',
+  '.DRRRRRRRRRRD...',
+  '.DRRRRRRRRRRD...',
+  '.DDRRRRRRRRDD...',
+  '..DRR....RRD....',
+  '..DD......DD....',
+  '.DD........DD...',
+], BSMAP))
+
 // ---- 8x8 font: '#'=colour 1. Authored 5x7, placed at cols 1..5 / rows 0..6. ----
 const GLYPHS = {
   A: [' ### ', '#   #', '#   #', '#####', '#   #', '#   #', '#   #'],
   B: ['#### ', '#   #', '#   #', '#### ', '#   #', '#   #', '#### '],
+  C: [' ####', '#    ', '#    ', '#    ', '#    ', '#    ', ' ####'],
+  D: ['#### ', '#   #', '#   #', '#   #', '#   #', '#   #', '#### '],
   E: ['#####', '#    ', '#    ', '#### ', '#    ', '#    ', '#####'],
+  F: ['#####', '#    ', '#    ', '#### ', '#    ', '#    ', '#    '],
   G: [' ####', '#    ', '#    ', '#  ##', '#   #', '#   #', ' ### '],
   H: ['#   #', '#   #', '#   #', '#####', '#   #', '#   #', '#   #'],
   I: ['#####', '  #  ', '  #  ', '  #  ', '  #  ', '  #  ', '#####'],
+  J: ['  ###', '   # ', '   # ', '   # ', '#  # ', '#  # ', ' ##  '],
   K: ['#   #', '#  # ', '# #  ', '##   ', '# #  ', '#  # ', '#   #'],
   L: ['#    ', '#    ', '#    ', '#    ', '#    ', '#    ', '#####'],
   M: ['#   #', '## ##', '# # #', '#   #', '#   #', '#   #', '#   #'],
   N: ['#   #', '##  #', '# # #', '#  ##', '#   #', '#   #', '#   #'],
   O: [' ### ', '#   #', '#   #', '#   #', '#   #', '#   #', ' ### '],
   P: ['#### ', '#   #', '#   #', '#### ', '#    ', '#    ', '#    '],
+  Q: [' ### ', '#   #', '#   #', '#   #', '# # #', '#  # ', ' ## #'],
   R: ['#### ', '#   #', '#   #', '#### ', '# #  ', '#  # ', '#   #'],
   S: [' ####', '#    ', '#    ', ' ### ', '    #', '    #', '#### '],
   T: ['#####', '  #  ', '  #  ', '  #  ', '  #  ', '  #  ', '  #  '],
   U: ['#   #', '#   #', '#   #', '#   #', '#   #', '#   #', ' ### '],
   V: ['#   #', '#   #', '#   #', '#   #', '#   #', ' # # ', '  #  '],
   W: ['#   #', '#   #', '#   #', '# # #', '# # #', '## ##', '#   #'],
+  X: ['#   #', '#   #', ' # # ', '  #  ', ' # # ', '#   #', '#   #'],
   Y: ['#   #', '#   #', ' # # ', '  #  ', '  #  ', '  #  ', '  #  '],
+  Z: ['#####', '    #', '   # ', '  #  ', ' #   ', '#    ', '#####'],
 }
+const DIGITS = [
+  [' ### ', '#   #', '#  ##', '# # #', '##  #', '#   #', ' ### '],  // 0
+  ['  #  ', ' ##  ', '  #  ', '  #  ', '  #  ', '  #  ', ' ### '],  // 1
+  [' ### ', '#   #', '    #', '   # ', '  #  ', ' #   ', '#####'],  // 2
+  ['#####', '   # ', '  #  ', '   # ', '    #', '#   #', ' ### '],  // 3
+  ['   # ', '  ## ', ' # # ', '#  # ', '#####', '   # ', '   # '],  // 4
+  ['#####', '#    ', '#### ', '    #', '    #', '#   #', ' ### '],  // 5
+  ['  ## ', ' #   ', '#    ', '#### ', '#   #', '#   #', ' ### '],  // 6
+  ['#####', '    #', '   # ', '  #  ', ' #   ', ' #   ', ' #   '],  // 7
+  [' ### ', '#   #', '#   #', ' ### ', '#   #', '#   #', ' ### '],  // 8
+  [' ### ', '#   #', '#   #', ' ####', '    #', '   # ', ' ##  '],  // 9
+]
 const FMAP = { ' ': 0, '#': 1 }
 for (let i = 0; i < 26; i++) {
   const ch = String.fromCharCode(65 + i)
@@ -213,6 +326,11 @@ for (let i = 0; i < 26; i++) {
   while (rows.length < 8) rows.push('')
   put(T.FONT + i, tile8(rows, FMAP))
 }
+DIGITS.forEach((g, d) => {
+  const rows = g.map(r => ' ' + r.padEnd(5, ' ') + '  ')
+  while (rows.length < 8) rows.push('')
+  put(T.DIGIT + d, tile8(rows, FMAP))
+})
 
 const outFile = path.join(__dirname, 'assets.bin')
 fs.writeFileSync(outFile, Buffer.from(sheet))

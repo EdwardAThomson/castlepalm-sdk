@@ -1,18 +1,22 @@
 ; ============================================================================
 ; STREET BRAWL — a Streets-of-Rage-style beat-'em-up prototype for CastlePalm
 ;
-;   Walk your hero around a sidewalk (8-way, D-pad), throw punches (A), and clear
-;   the street of thugs. Enemies chase you, stagger and flash white when hit, and
-;   get knocked back; touch one and you lose a chunk of the health bar up top.
-;   Clear all six and YOU WIN; run out of health and it's GAME OVER.
+;   Walk your hero along a scrolling sidewalk (8-way, D-pad), throw punches (A),
+;   and clear the street of thugs. Enemies chase you, stagger and flash white when
+;   hit, and get knocked back; touch one and you lose a chunk of the health bar.
+;   Clear a wave of thugs and the street scrolls on; clear two waves and a boss to
+;   finish a stage, then an interstitial leads into the next of three stages. Clear
+;   the last boss to WIN, or run out of health for GAME OVER. Grab a lead pipe to
+;   hit harder and farther (limited swings), and a drumstick to restore health.
 ;
-;   Controls:  D-pad = move    A = punch    Start = begin / restart
+;   Controls:  D-pad = move    A = punch / swing    Start = begin / restart
 ;
 ;   Art lives in assets.bin (built by gen_assets.js) and is INCBIN'd at the end,
-;   then copied to VRAM at boot. Build it first:
+;   then copied to VRAM at boot. Build it first, then run the built .cpc (run.js
+;   can't read INCBIN from a .asm, but build-cart.js can):
 ;       node examples/streetbrawl/gen_assets.js
 ;       node tools/build-cart.js examples/streetbrawl/streetbrawl.asm streetbrawl.cpc BRAWL
-;       node tools/run.js examples/streetbrawl/streetbrawl.asm 90 shot.png --start
+;       node tools/run.js streetbrawl.cpc 90 shot.png --start
 ; ============================================================================
 
 ; ---- MMIO ----
@@ -23,6 +27,7 @@ PAL_INDEX  EQU $101008
 PAL_DATA   EQU $10100A
 OAM_INDEX  EQU $10100C
 OAM_DATA   EQU $10100E
+BG0_SX     EQU $101010    ; BG0 horizontal scroll (signed 16-bit latch)
 PPU_CTRL   EQU $101018
 SQ0_PERIOD EQU $102000
 SQ0_VOL    EQU $102002
@@ -44,20 +49,35 @@ ROAD     EQU 3
 CURB     EQU 4
 HP_FULL  EQU 5
 HP_EMPTY EQU 6
+WPN_ICON EQU 8
+BHP_FULL EQU 9          ; boss health-bar cell
 PL_WALKA EQU 16
 PL_WALKB EQU 20
 PL_PUNCH EQU 24
 EN_WALKA EQU 32
 EN_WALKB EQU 36
+WEAPON   EQU 40         ; pipe pickup / held weapon (16x16)
+FOOD     EQU 44         ; food pickup (16x16)
+BOSS     EQU 48         ; boss (16x16)
+WEAPON_UP EQU 52        ; pipe raised mid-swing (16x16)
 FONT     EQU 64
+DIGIT    EQU 96         ; DIGIT + (0..9)
 
 ; ---- tuning ----
 NENEM    EQU 6
 ENHP     EQU 3
 SPEED    EQU 2          ; player px / frame
 ESPD     EQU 1          ; enemy px / frame (slower, so you can juke them)
-PUNCHT   EQU 14         ; punch animation length (frames)
-PUNCHHIT EQU 9          ; the single frame the fist is "live"
+PUNCHT   EQU 12         ; bare-fist swing length (frames)
+PUNCHHIT EQU 8          ; the single frame the fist/weapon is "live"
+FISTDMG  EQU 1          ; damage per bare-fist hit
+WPNDMG   EQU 3          ; damage per pipe hit (one-shots a thug)
+WPNUSES  EQU 8          ; pipe swings before it breaks
+WPNT     EQU 14         ; pipe swing length (long enough to read the wind-up)
+WPNREACH EQU 14         ; extra hitbox reach while armed (px)
+WPNCOL   EQU 32         ; HUD column where the weapon pips start
+FOODHP   EQU 6          ; health restored by a food pickup
+PICKR    EQU 14         ; pickup grab radius (centre distance)
 KB       EQU 3          ; enemy knockback px / frame while staggered
 HITSTUN  EQU 18         ; enemy stagger frames after a hit
 INVULN   EQU 30         ; player i-frames after taking a hit
@@ -66,7 +86,19 @@ HP0      EQU 16         ; starting health (= HP bar cells)
 BANDTOP  EQU 96         ; player/enemy vertical play band (py range)
 BANDBOT  EQU 190
 XMIN     EQU 4
-XMAX     EQU 300
+PXMAX    EQU 300        ; player reach to the right of the current camera limit
+EXMAX    EQU 1500       ; enemy world-x clamp (knockback)
+; ---- progression: each level is NORMW thug waves + a boss; clear all NLEVELS to win ----
+WAVEN    EQU 3          ; thugs on screen per normal wave (must be <= NENEM)
+SEG      EQU 200        ; camera advance per wave (world px)
+NLEVELS  EQU 3          ; number of stages
+NORMW    EQU 2          ; normal waves per level before the boss (boss = wave NORMW)
+BOSSHP   EQU 18         ; boss hit points
+BOSSBAR  EQU 18         ; boss HP-bar cells (== BOSSHP, so no scaling math)
+INTERT   EQU 150        ; interstitial duration (frames)
+CLRPAUSE EQU 110        ; quiet beat after a boss falls, before the next screen
+EHOLD0   EQU 80         ; freeze the first wave this long so it doesn't rush you
+EHOLD    EQU 30         ; brief freeze on later wave spawns
 
 ; ---- RAM ----
 state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over
@@ -81,12 +113,27 @@ p_hp     EQU $000116
 p_punch  EQU $000118
 p_hurt   EQU $00011A    ; i-frame / blink countdown
 p_anim   EQU $00011C
+cam      EQU $000140    ; camera world-x (left screen edge)
+cammax   EQU $000142    ; current right limit for the camera (grows per wave)
+wave     EQU $000144    ; wave index within the current level (boss = NORMW)
+p_weapon EQU $000146    ; pipe swings remaining (0 = bare fists)
+p_wswing EQU $000148    ; current swing is a pipe swing (latched at swing start)
+p_dmg    EQU $00014A    ; damage of the current swing (set in checkhit)
+level    EQU $00014C    ; current stage index (0..NLEVELS-1)
+bossactive EQU $00014E  ; 1 while a boss is on screen (slot 0 is the boss)
+bossmaxhp EQU $000150   ; boss starting HP (for the bar)
+interT   EQU $000152    ; interstitial countdown (state 4)
+ehold    EQU $000154    ; frames the freshly-spawned wave stays frozen
+clrpause EQU $000156    ; quiet beat after a boss dies, before the next screen
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
 hbx1     EQU $000132
 hby0     EQU $000134
 hby1     EQU $000136
 ENEMY    EQU $000200    ; NENEM slots x 8 bytes
 ;   +0 alive  +1 hp  +2 hurt(stagger)  +3 faceRight  +4 px(u16)  +6 py(u16)
+NPICK    EQU 4          ; max pickups live at once
+PICKUP   EQU $000260    ; NPICK slots x 8 bytes
+;   +0 type (0 none, 1 pipe, 2 food)  +2 px(u16)  +4 py(u16)
 
 ; ---- text codes (print maps 0..25 -> letters, 26 -> space, $FF -> end) ----
 A EQU 0
@@ -128,8 +175,8 @@ END EQU $FF
 start:
   CALL setpal
   CALL copysheet
-  MOV R0, #1
-  STW R0, [PPU_CTRL]        ; enable BG0
+  MOV R0, #3
+  STW R0, [PPU_CTRL]        ; enable BG0 (scrolling street) + BG1 (fixed HUD overlay)
   MOV R0, #0
   STW R0, [in_now]
   STW R0, [in_prev]
@@ -142,11 +189,16 @@ mainloop:
   CALL readpad
   LDW R0, [state]
   CMP R0, #1
-  BNE ml_menu
+  BEQ ml_play
+  CMP R0, #4
+  BEQ ml_inter
+  CALL menuframe
+  BRA ml_wait
+ml_play:
   CALL playframe
   BRA ml_wait
-ml_menu:
-  CALL menuframe
+ml_inter:
+  CALL interframe
 ml_wait:
   CALL sfxtick
   WAIT
@@ -186,13 +238,21 @@ playframe:
   CALL domove
   CALL punchupdate
   CALL doenemies
+  CALL dopickups
   LDW R0, [p_hurt]         ; tick i-frames
   CMP R0, #0
   BEQ pf_nh
   SUB R0, #1
   STW R0, [p_hurt]
 pf_nh:
+  CALL updatecam
   CALL drawhp
+  CALL drawweapon
+  LDW R0, [bossactive]
+  CMP R0, #0
+  BEQ pf_nbb
+  CALL drawbosshp
+pf_nbb:
   CALL buildoam
   LDW R0, [p_hp]           ; dead?
   CMP R0, #0
@@ -203,14 +263,58 @@ pf_nh:
   CALL drawover
   RET
 pf_ckwin:
-  LDW R0, [kills]          ; street cleared?
-  CMP R0, #NENEM
-  BLT pf_done
-  MOV R0, #2
+  CALL countalive          ; current wave cleared?
+  CMP R0, #0
+  BNE pf_done
+  LDW R0, [wave]           ; was it the boss wave?
+  CMP R0, #NORMW
+  BLT pf_adv               ; normal wave -> next wave, same level
+  LDW R0, [clrpause]       ; boss cleared -> hold a quiet beat first
+  CMP R0, #0
+  BNE pf_pausetick
+  MOV R0, #CLRPAUSE        ; first frame the boss is down: start the pause
+  STW R0, [clrpause]
+  RET
+pf_pausetick:
+  SUB R0, #1
+  STW R0, [clrpause]
+  CMP R0, #0
+  BNE pf_done              ; still pausing on a quiet street
+  LDW R0, [level]          ; pause over -> next stage or the win screen
+  ADD R0, #1
+  CMP R0, #NLEVELS
+  BLT pf_inter             ; more stages -> interstitial
+  MOV R0, #2               ; final boss down -> WIN
   STW R0, [state]
   CALL clearoam
   CALL drawwin
+  RET
+pf_inter:
+  MOV R0, #4               ; into the interstitial state
+  STW R0, [state]
+  MOV R0, #INTERT
+  STW R0, [interT]
+  CALL clearoam
+  CALL drawinter
+  RET
+pf_adv:
+  CALL nextwave
 pf_done:
+  RET
+
+; ---- interframe: hold the interstitial, then load the next stage ----
+interframe:
+  LDW R0, [interT]
+  SUB R0, #1
+  STW R0, [interT]
+  CMP R0, #0
+  BNE if_done
+  LDW R0, [level]          ; advance to the next stage
+  ADD R0, #1
+  CALL loadlevel
+  MOV R0, #1
+  STW R0, [state]
+if_done:
   RET
 
 ; ============================ player movement ============================
@@ -247,13 +351,7 @@ dm_d:
   ADD R1, #SPEED
   MOV R4, #1
 dm_clx:
-  CMP R0, #XMIN
-  BGE dm_clx2
-  MOV R0, #XMIN
-dm_clx2:
-  CMP R0, #XMAX
-  BLE dm_cly
-  MOV R0, #XMAX
+  CALL clampxp            ; clamp px to [XMIN, cammax+PXMAX]
 dm_cly:
   CMP R1, #BANDTOP
   BGE dm_cly2
@@ -285,6 +383,21 @@ punchupdate:
   LDW R0, [p_punch]
   CMP R0, #0
   BNE pu_tick             ; already mid-swing
+  LDW R0, [p_weapon]      ; armed? -> pipe swing
+  CMP R0, #0
+  BEQ pu_fist
+  SUB R0, #1
+  STW R0, [p_weapon]      ; spend one swing
+  MOV R0, #1
+  STW R0, [p_wswing]
+  MOV R0, #WPNT
+  STW R0, [p_punch]
+  MOV R0, #150            ; pipe whoosh (lower pitch)
+  CALL sfxblip
+  BRA pu_tick
+pu_fist:
+  MOV R0, #0
+  STW R0, [p_wswing]
   MOV R0, #PUNCHT
   STW R0, [p_punch]
   MOV R0, #180
@@ -301,14 +414,27 @@ pu_tick:
 pu_done:
   RET
 
-; ---- build the fist hitbox in front of the player, damage any thug inside ----
+; ---- build the strike hitbox in front of the player, damage any thug inside ----
 checkhit:
+  LDW R0, [p_wswing]     ; pick damage + reach bonus for this swing
+  CMP R0, #0
+  BEQ ch_fist
+  MOV R0, #WPNDMG
+  STB R0, [p_dmg]
+  MOV R2, #WPNREACH
+  BRA ch_box
+ch_fist:
+  MOV R0, #FISTDMG
+  STB R0, [p_dmg]
+  MOV R2, #0
+ch_box:
   LDW R0, [p_x]
   LDW R1, [p_face]
   AND R1, #1
   BEQ ch_right
   MOV R4, R0              ; facing left: box covers body + reach to the left
   SUB R4, #14
+  SUB R4, R2             ; + weapon reach
   MOV R5, R0
   ADD R5, #20
   BRA ch_y
@@ -317,6 +443,7 @@ ch_right:
   SUB R4, #4
   MOV R5, R0
   ADD R5, #30
+  ADD R5, R2            ; + weapon reach
 ch_y:
   STW R4, [hbx0]
   STW R5, [hbx1]
@@ -363,10 +490,15 @@ ch_next:
   BLT ch_lp
   RET
 
-; ---- enemyhit(A1=slot): -1 hp, stagger, die if drained ----
+; ---- enemyhit(A1=slot): -p_dmg hp, stagger, die if drained ----
 enemyhit:
   LDB R0, [A1+#1]
-  SUB R0, #1
+  LDB R1, [p_dmg]
+  SUB R0, R1
+  CMP R0, #0             ; clamp at 0 (pipe damage can exceed hp)
+  BGE eh_set
+  MOV R0, #0
+eh_set:
   STB R0, [A1+#1]
   MOV R1, #HITSTUN
   STB R1, [A1+#2]
@@ -388,6 +520,12 @@ eh_done:
 
 ; ============================ enemies ============================
 doenemies:
+  LDW R0, [ehold]         ; tick the post-spawn grace timer
+  CMP R0, #0
+  BEQ de_go
+  SUB R0, #1
+  STW R0, [ehold]
+de_go:
   MOV R7, #0
 de_lp:
   MOV R3, R7
@@ -409,6 +547,11 @@ eai:
   BNE ea_live
   RET
 ea_live:
+  LDW R0, [ehold]         ; freshly spawned -> hold still (grace period)
+  CMP R0, #0
+  BEQ ea_run
+  RET
+ea_run:
   LDB R0, [A1+#2]         ; staggered?
   CMP R0, #0
   BEQ ea_chase
@@ -427,9 +570,9 @@ ea_kbc:
   BGE ea_kbx2
   MOV R4, #XMIN
 ea_kbx2:
-  CMP R4, #XMAX
+  CMP R4, #EXMAX
   BLE ea_kbs
-  MOV R4, #XMAX
+  MOV R4, #EXMAX
 ea_kbs:
   STW R4, [A1+#4]
   RET
@@ -498,13 +641,7 @@ hu_if:
 hu_left:
   SUB R0, #6
 hu_clx:
-  CMP R0, #XMIN
-  BGE hu_clx2
-  MOV R0, #XMIN
-hu_clx2:
-  CMP R0, #XMAX
-  BLE hu_store
-  MOV R0, #XMAX
+  CALL clampxp            ; clamp px to [XMIN, cammax+PXMAX]
 hu_store:
   STW R0, [p_x]
   MOV R0, #260
@@ -519,11 +656,43 @@ absr0:
 abr_d:
   RET
 
+; ---- clampxp: R0 = clamp(R0, XMIN, cammax+PXMAX); scratches R2 ----
+clampxp:
+  CMP R0, #XMIN
+  BGE cxp_hi
+  MOV R0, #XMIN
+cxp_hi:
+  LDW R2, [cammax]
+  ADD R2, #PXMAX
+  CMP R0, R2
+  BLE cxp_d
+  MOV R0, R2
+cxp_d:
+  RET
+
+; ---- updatecam: centre the camera on the player, clamped to the wave's limit ----
+updatecam:
+  LDW R0, [p_x]
+  SUB R0, #152            ; player at screen centre (320/2 - 8)
+  CMP R0, #0
+  BGE uc_lo
+  MOV R0, #0
+uc_lo:
+  LDW R1, [cammax]
+  CMP R0, R1
+  BLE uc_set
+  MOV R0, R1
+uc_set:
+  STW R0, [cam]
+  STW R0, [BG0_SX]        ; scroll BG0 to match (street wraps, so it stays seamless)
+  RET
+
 ; ============================ OAM (sprites) ============================
 buildoam:
   MOV R0, #0
   STW R0, [OAM_INDEX]
   CALL emitplayer
+  CALL emitweapon          ; held pipe (off when unarmed)
   MOV R7, #0
 bo_e:
   MOV R3, R7
@@ -534,6 +703,16 @@ bo_e:
   ADD R7, #1
   CMP R7, #NENEM
   BLT bo_e
+  MOV R7, #0
+bo_p:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #PICKUP
+  ADD A1, R3
+  CALL emitpickup
+  ADD R7, #1
+  CMP R7, #NPICK
+  BLT bo_p
   RET
 
 emitplayer:
@@ -568,6 +747,8 @@ ep_attr:
   ADD R6, #$40           ; hflip (face left)
 ep_emit:
   LDW R0, [p_x]
+  LDW R3, [cam]
+  SUB R0, R3              ; world x -> screen x
   LDW R1, [p_y]
   CALL emittile
   RET
@@ -579,10 +760,22 @@ emitenemy:
   CALL emitoff
   RET
 ee_on:
-  LDW R0, [A1+#4]         ; ex
-  LDW R1, [A1+#6]         ; ey
-  MOV R5, #EN_WALKA       ; simple two-frame shuffle keyed to x
-  MOV R2, R0
+  LDW R4, [A1+#4]         ; world ex (kept for the anim key + culling)
+  LDW R3, [cam]
+  MOV R0, R4
+  SUB R0, R3              ; screen x
+  CMP R0, #320            ; off the right edge?
+  BGE ee_cull
+  MOV R3, R0
+  ADD R3, #16
+  CMP R3, #0             ; fully off the left edge (screen x <= -16)?
+  BLT ee_cull
+  LDW R1, [A1+#6]         ; ey (no vertical scroll)
+  LDW R2, [bossactive]    ; during a boss wave the lone live thug is the boss
+  CMP R2, #0
+  BNE ee_boss
+  MOV R5, #EN_WALKA       ; simple two-frame shuffle keyed to world x
+  MOV R2, R4
   SHR R2, #2
   AND R2, #1
   BEQ ee_tile
@@ -600,6 +793,105 @@ ee_face:
   ADD R6, #$40
 ee_emit:
   CALL emittile
+  RET
+ee_cull:
+  CALL emitoff           ; still consume one OAM slot, just disabled
+  RET
+ee_boss:
+  MOV R5, #BOSS
+  MOV R6, #$16           ; size16 | palette bank 6
+  LDB R2, [A1+#2]        ; staggered -> white flash (bank 4)
+  CMP R2, #0
+  BEQ ee_bface
+  MOV R6, #$14
+ee_bface:
+  LDB R2, [A1+#3]        ; faceRight -> hflip (boss art faces left)
+  CMP R2, #0
+  BEQ ee_bemit
+  ADD R6, #$40
+ee_bemit:
+  CALL emittile
+  RET
+
+; ---- emitweapon: the pipe in the player's hand; animates through a swing ----
+;   not swinging -> held at the side; wind-up -> raised diagonally above the head;
+;   strike (at/after the live frame) -> thrust out front.
+emitweapon:
+  LDW R0, [p_weapon]
+  CMP R0, #0
+  BNE ew_on
+  CALL emitoff
+  RET
+ew_on:
+  MOV R5, #WEAPON        ; defaults: held pose
+  MOV R2, #8             ; x offset from the player
+  MOV R4, #0             ; raise (subtracted from py)
+  LDW R0, [p_punch]      ; mid-swing?
+  CMP R0, #0
+  BEQ ew_face
+  LDW R1, [p_wswing]
+  CMP R1, #0
+  BEQ ew_face            ; a bare-fist swing -> just hold the pipe
+  CMP R0, #PUNCHHIT
+  BLE ew_strike          ; at/after the live frame -> thrust forward
+  MOV R5, #WEAPON_UP     ; wind-up: raised on the diagonal
+  MOV R2, #2
+  MOV R4, #10
+  BRA ew_face
+ew_strike:
+  MOV R5, #WEAPON
+  MOV R2, #18
+  MOV R4, #0
+ew_face:
+  LDW R0, [p_x]
+  LDW R1, [p_face]
+  AND R1, #1
+  BEQ ew_right
+  SUB R0, R2             ; facing left: mirror the offset + hflip
+  MOV R6, #$55           ; size16 | bank5 | hflip
+  BRA ew_xpos
+ew_right:
+  ADD R0, R2
+  MOV R6, #$15           ; size16 | bank5
+ew_xpos:
+  LDW R3, [cam]
+  SUB R0, R3
+  LDW R1, [p_y]
+  SUB R1, R4             ; raise up during the wind-up
+  CALL emittile
+  RET
+
+; ---- emitpickup(A1=slot): a pipe/food item on the ground, camera-offset + culled ----
+emitpickup:
+  LDB R0, [A1+#0]        ; type
+  CMP R0, #0
+  BNE epk_on
+  CALL emitoff
+  RET
+epk_on:
+  CMP R0, #1
+  BNE epk_food
+  MOV R5, #WEAPON
+  BRA epk_pos
+epk_food:
+  MOV R5, #FOOD
+epk_pos:
+  LDW R4, [A1+#2]        ; world x
+  LDW R3, [cam]
+  MOV R0, R4
+  SUB R0, R3             ; screen x
+  CMP R0, #320
+  BGE epk_cull
+  MOV R3, R0
+  ADD R3, #16
+  CMP R3, #0
+  BLT epk_cull
+  LDW R1, [A1+#4]        ; y
+  MOV R6, #$15           ; size16 | bank5
+  CALL emittile
+  RET
+epk_cull:
+  CALL emitoff
   RET
 
 ; ---- emittile(R0=px, R1=py, R5=tile, R6=attrLo): one enabled 16x16 descriptor ----
@@ -646,12 +938,157 @@ hb_full:
   MOV R2, #HP_FULL
 hb_set:
   MOV R0, R4
-  MOV R1, #0
-  MOV R3, #0
-  CALL settile
+  CALL hpcell
   ADD R4, #1
   CMP R4, #HP0
   BLT hb_lp
+  RET
+
+; ---- hpcell(R0=col, R2=tile): a HUD cell on BG1 row 0, palette 0 (HP / weapon) ----
+hpcell:
+  MOV R1, #0
+  MOV R3, #0
+  ; fall through to hudtile
+; ---- hudtile(R0=col, R1=row, R2=tile, R3=pal): one BG1 (HUD) map cell ----
+hudtile:
+  MOV R6, R0
+  SHL R6, #2             ; col*4 = low byte of the offset
+  STB R6, [VRAM_ADDR]
+  MOV R6, R1
+  ADD R6, #$40           ; row + $40 -> BG1 map base $14000 mid byte
+  STB R6, [VRAM_ADDR+1]
+  MOV R7, #1
+  STB R7, [VRAM_ADDR+2]
+  STB R2, [VRAM_DATA]     ; tile lo
+  MOV R7, R2
+  SHR R7, #8
+  AND R7, #7            ; tile hi 3 bits
+  MOV R6, R3
+  SHL R6, #3            ; palette in bits 3..6
+  OR R7, R6
+  STB R7, [VRAM_DATA]
+  MOV R7, #0
+  STB R7, [VRAM_DATA]
+  STB R7, [VRAM_DATA]
+  RET
+
+; ---- drawbosshp: a red bar (row 1) of one cell per boss HP point remaining ----
+drawbosshp:
+  LDA A1, #ENEMY
+  LDB R5, [A1+#1]         ; boss current HP
+  MOV R4, #0
+bh_lp:
+  CMP R4, R5
+  BLT bh_full
+  MOV R2, #HP_EMPTY
+  BRA bh_set
+bh_full:
+  MOV R2, #BHP_FULL
+bh_set:
+  MOV R0, R4
+  ADD R0, #11            ; bar runs cols 11..28
+  MOV R1, #1             ; HUD row 1
+  MOV R3, #0
+  CALL hudtile
+  ADD R4, #1
+  CMP R4, #BOSSBAR
+  BLT bh_lp
+  RET
+
+; ---- huddigit(R0=value 0..9, R4=col): one digit on BG1 row 0 in white (palette 3) ----
+huddigit:
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  MOV R1, #0
+  MOV R3, #3
+  CALL hudtile
+  RET
+
+; ---- hudprint(A1=string, R4=col): draw text on BG1 row 0 in white (palette 3) ----
+hudprint:
+hl_lp:
+  LDB R2, [A1]
+  CMP R2, #$FF
+  BEQ hl_done
+  CMP R2, #26
+  BEQ hl_adv
+  ADD R2, #FONT
+  MOV R0, R4
+  MOV R1, #0
+  MOV R3, #3
+  CALL hudtile
+hl_adv:
+  ADD R4, #1
+  INC A1
+  BRA hl_lp
+hl_done:
+  RET
+
+; ---- drawlevelhud: "STAGE n" in the middle of the HUD strip ----
+drawlevelhud:
+  LDA A1, #sSTAGE
+  MOV R4, #17
+  CALL hudprint
+  LDW R0, [level]
+  ADD R0, #1             ; show 1-based
+  MOV R4, #23
+  CALL huddigit
+  RET
+
+; ---- clearhp: blank both HUD rows (HP bar + weapon widget + boss bar) ----
+clearhp:
+  MOV R5, #0             ; row
+clh_row:
+  MOV R4, #0             ; col
+clh_lp:
+  MOV R0, R4
+  MOV R1, R5
+  MOV R2, #0
+  MOV R3, #0
+  CALL hudtile
+  ADD R4, #1
+  CMP R4, #40
+  BLT clh_lp
+  ADD R5, #1
+  CMP R5, #2
+  BLT clh_row
+  RET
+
+; ---- drawweapon: HUD pipe icon + a green pip per swing remaining (blank if unarmed) ----
+drawweapon:
+  LDW R0, [p_weapon]
+  CMP R0, #0
+  BNE dw_armed
+  MOV R4, #31              ; unarmed: clear icon + pip cells
+dw_clr:
+  MOV R0, R4
+  MOV R2, #0
+  CALL hpcell
+  ADD R4, #1
+  CMP R4, #40
+  BLT dw_clr
+  RET
+dw_armed:
+  MOV R0, #31              ; the "armed" pipe icon
+  MOV R2, #WPN_ICON
+  CALL hpcell
+  MOV R4, #0
+dw_lp:
+  LDW R0, [p_weapon]
+  CMP R4, R0
+  BLT dw_full
+  MOV R2, #HP_EMPTY
+  BRA dw_set
+dw_full:
+  MOV R2, #HP_FULL
+dw_set:
+  MOV R0, R4
+  ADD R0, #WPNCOL          ; pips at cols 32..39
+  CALL hpcell
+  ADD R4, #1
+  CMP R4, #WPNUSES
+  BLT dw_lp
   RET
 
 ; ---- buildstreet: brick wall up top, a curb line, then sidewalk ----
@@ -674,7 +1111,7 @@ bs_set:
   MOV R3, #0
   CALL settile
   ADD R4, #1
-  CMP R4, #40
+  CMP R4, #64             ; fill the whole 64-wide map so the wrap stays seamless
   BLT bs_x
   ADD R5, #1
   CMP R5, #28
@@ -758,8 +1195,20 @@ pr_done:
   RET
 
 ; ============================ screens ============================
+; ---- menureset: unscroll BG0 and clear the HUD before drawing a menu screen ----
+menureset:
+  MOV R0, #0
+  STW R0, [cam]
+  STW R0, [BG0_SX]
+  CALL clearhp
+  RET
+
 drawtitle:
+  CALL menureset
+  MOV R0, #0
+  CALL setlevelpal         ; title always wears stage-1 colours
   CALL clearmap
+  CALL drawtitlebg         ; brick wall + sidewalk backdrop
   LDA A1, #sTITLE1
   MOV R4, #17
   MOV R5, #9
@@ -768,59 +1217,439 @@ drawtitle:
   MOV R4, #17
   MOV R5, #12
   CALL print
+  LDA A1, #sTAG
+  MOV R4, #14
+  MOV R5, #15
+  CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #18
+  MOV R5, #19
   CALL print
+  CALL titlesprites        ; hero vs. thugs + boss lineup
+  RET
+
+; ---- drawtitlebg: a brick wall band up top and a sidewalk band along the bottom ----
+drawtitlebg:
+  MOV R5, #2              ; brick wall rows 2..6
+tbg_w:
+  MOV R4, #0
+tbg_wx:
+  MOV R0, R4
+  MOV R1, R5
+  MOV R2, #BRICK
+  MOV R3, #0
+  CALL settile
+  ADD R4, #1
+  CMP R4, #40
+  BLT tbg_wx
+  ADD R5, #1
+  CMP R5, #7
+  BLT tbg_w
+  MOV R4, #0             ; curb row 7
+tbg_c:
+  MOV R0, R4
+  MOV R1, #7
+  MOV R2, #CURB
+  MOV R3, #0
+  CALL settile
+  ADD R4, #1
+  CMP R4, #40
+  BLT tbg_c
+  MOV R5, #8            ; sidewalk fills everything below the curb (matches the game)
+tbg_s:
+  MOV R4, #0
+tbg_sx:
+  MOV R0, R4
+  MOV R1, R5
+  MOV R2, #SIDEWALK
+  MOV R3, #0
+  CALL settile
+  ADD R4, #1
+  CMP R4, #40
+  BLT tbg_sx
+  ADD R5, #1
+  CMP R5, #28
+  BLT tbg_s
+  RET
+
+; ---- titlesprites: a static cast lineup standing on the bottom sidewalk ----
+titlesprites:
+  MOV R0, #0
+  STW R0, [OAM_INDEX]
+  MOV R0, #56            ; hero, facing right
+  MOV R1, #160
+  MOV R5, #PL_WALKA
+  MOV R6, #$11
+  CALL emittile
+  MOV R0, #96            ; a pipe on the ground
+  MOV R1, #172
+  MOV R5, #WEAPON
+  MOV R6, #$15
+  CALL emittile
+  MOV R0, #128           ; food on the ground
+  MOV R1, #172
+  MOV R5, #FOOD
+  MOV R6, #$15
+  CALL emittile
+  MOV R0, #180           ; thug (art already faces left, toward the hero)
+  MOV R1, #160
+  MOV R5, #EN_WALKA
+  MOV R6, #$12
+  CALL emittile
+  MOV R0, #212           ; second thug
+  MOV R1, #160
+  MOV R5, #EN_WALKB
+  MOV R6, #$12
+  CALL emittile
+  MOV R0, #246           ; the boss
+  MOV R1, #156
+  MOV R5, #BOSS
+  MOV R6, #$16
+  CALL emittile
   RET
 
 drawwin:
+  CALL menureset
   CALL clearmap
+  CALL drawtitlebg
   LDA A1, #sWIN
   MOV R4, #16
-  MOV R5, #12
+  MOV R5, #9
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #16
+  MOV R5, #19
   CALL print
+  CALL winsprites
+  RET
+
+; ---- winsprites: hero stands tall with the pipe raised; the gang lies beaten ----
+winsprites:
+  MOV R0, #0
+  STW R0, [OAM_INDEX]
+  MOV R0, #60            ; hero, on the left, standing
+  MOV R1, #158
+  MOV R5, #PL_WALKA
+  MOV R6, #$11
+  CALL emittile
+  MOV R0, #70            ; pipe raised in victory
+  MOV R1, #148
+  MOV R5, #WEAPON_UP
+  MOV R6, #$15
+  CALL emittile
+  MOV R0, #140           ; beaten thug (vflip = flat on its back)
+  MOV R1, #176
+  MOV R5, #EN_WALKA
+  MOV R6, #$92
+  CALL emittile
+  MOV R0, #178
+  MOV R1, #176
+  MOV R5, #EN_WALKB
+  MOV R6, #$92
+  CALL emittile
+  MOV R0, #216           ; beaten boss
+  MOV R1, #174
+  MOV R5, #BOSS
+  MOV R6, #$96
+  CALL emittile
   RET
 
 drawover:
+  CALL menureset
   CALL clearmap
+  CALL drawtitlebg
   LDA A1, #sOVER
   MOV R4, #15
-  MOV R5, #12
+  MOV R5, #9
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #16
+  MOV R5, #19
   CALL print
+  CALL oversprites
+  RET
+
+; ---- oversprites: the hero is down; the gang stands over him ----
+oversprites:
+  MOV R0, #0
+  STW R0, [OAM_INDEX]
+  MOV R0, #150           ; downed hero (vflip), centre
+  MOV R1, #176
+  MOV R5, #PL_WALKA
+  MOV R6, #$91
+  CALL emittile
+  MOV R0, #100           ; thug standing over him, facing right
+  MOV R1, #158
+  MOV R5, #EN_WALKA
+  MOV R6, #$52
+  CALL emittile
+  MOV R0, #208           ; thug on the right
+  MOV R1, #158
+  MOV R5, #EN_WALKB
+  MOV R6, #$12
+  CALL emittile
+  MOV R0, #240           ; the boss looms
+  MOV R1, #154
+  MOV R5, #BOSS
+  MOV R6, #$16
+  CALL emittile
+  RET
+
+; ---- drawinter: "STAGE n / GET READY" shown between stages ----
+drawinter:
+  CALL menureset
+  CALL clearmap
+  LDA A1, #sSTAGE
+  MOV R4, #16
+  MOV R5, #10
+  CALL print
+  LDW R0, [level]          ; upcoming stage (level is the one just cleared), 1-based
+  ADD R0, #2
+  MOV R4, #22
+  MOV R5, #10
+  CALL printdigit
+  LDA A1, #sREADY
+  MOV R4, #15
+  MOV R5, #14
+  CALL print
+  RET
+
+; ---- printdigit(R0=value, R4=col, R5=row): one digit on BG0 in white ----
+printdigit:
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile
   RET
 
 ; ============================ new game ============================
 newgame:
+  MOV R0, #0
+  STW R0, [kills]
+  STW R0, [level]
+  CALL loadlevel           ; build stage 0 (R0 = 0)
+  MOV R0, #HP0
+  STW R0, [p_hp]           ; full health for a fresh game
+  MOV R0, #1
+  STW R0, [state]
+  RET
+
+; ---- loadlevel(R0=level): recolour + paint the stage, reset camera/player, wave 0 ----
+loadlevel:
+  STW R0, [level]
+  CALL setlevelpal         ; (R0 still = level)
   CALL clearmap
   CALL buildstreet
-  MOV R0, #152
-  STW R0, [p_x]
-  MOV R0, #150
-  STW R0, [p_y]
   MOV R0, #0
+  STW R0, [cam]
+  STW R0, [cammax]
+  STW R0, [BG0_SX]
+  STW R0, [wave]
+  STW R0, [bossactive]
+  STW R0, [clrpause]
   STW R0, [p_face]
   STW R0, [p_punch]
   STW R0, [p_hurt]
   STW R0, [p_anim]
-  STW R0, [kills]
-  MOV R0, #HP0
-  STW R0, [p_hp]
-  LDA A0, #espawn
+  STW R0, [p_weapon]       ; pipe does not carry between stages
+  STW R0, [p_wswing]
+  MOV R0, #80
+  STW R0, [p_x]            ; start at the left of the new street
+  MOV R0, #150
+  STW R0, [p_y]
+  CALL clearpickups
+  CALL clearoam            ; wipe any title-screen lineup sprites
+  CALL clearhp
+  CALL drawlevelhud
+  CALL spawnwave           ; first wave of this stage
+  MOV R0, #1               ; a pipe to open the stage with
+  MOV R1, #240
+  MOV R2, #130
+  CALL addpickup
+  RET
+
+; ---- setlevelpal(R0=level): per-stage brick / sidewalk / enemy-body colours ----
+setlevelpal:
+  MOV R3, R0
+  SHL R3, #3              ; level * 8 bytes (4 words each)
+  LDA A0, #levelpal
+  ADD A0, R3
+  MOV R0, #1             ; BG bank 0 entries 1,2,3
+  STB R0, [PAL_INDEX]
+  LDW R0, [A0]
+  STW R0, [PAL_DATA]     ; 1 brick dark
+  LDW R0, [A0+#2]
+  STW R0, [PAL_DATA]     ; 2 brick light
+  LDW R0, [A0+#4]
+  STW R0, [PAL_DATA]     ; 3 sidewalk
+  MOV R0, #33           ; enemy bank 2 entry 1
+  STB R0, [PAL_INDEX]
+  LDW R0, [A0+#6]
+  STW R0, [PAL_DATA]     ; enemy body colour
+  RET
+
+; ---- addpickup(R0=type, R1=x, R2=y): drop into the first free pickup slot ----
+addpickup:
+  PUSH R7
   MOV R7, #0
-ng_e:
+ap_lp:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #PICKUP
+  ADD A1, R3
+  LDB R4, [A1+#0]
+  CMP R4, #0
+  BEQ ap_free
+  ADD R7, #1
+  CMP R7, #NPICK
+  BLT ap_lp
+  POP R7                   ; no room -> drop it silently
+  RET
+ap_free:
+  STB R0, [A1+#0]
+  STW R1, [A1+#2]
+  STW R2, [A1+#4]
+  POP R7
+  RET
+
+; ---- clearpickups: empty every pickup slot ----
+clearpickups:
+  MOV R7, #0
+cpk_lp:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #PICKUP
+  ADD A1, R3
+  MOV R0, #0
+  STB R0, [A1+#0]
+  ADD R7, #1
+  CMP R7, #NPICK
+  BLT cpk_lp
+  RET
+
+; ---- dopickups: grab any pickup the player is standing on ----
+dopickups:
+  MOV R7, #0
+dp_lp:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #PICKUP
+  ADD A1, R3
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ dp_next
+  LDW R1, [A1+#2]          ; |px - p_x| < PICKR ?
+  LDW R2, [p_x]
+  MOV R0, R1
+  SUB R0, R2
+  CALL absr0
+  CMP R0, #PICKR
+  BGE dp_next
+  LDW R1, [A1+#4]          ; |py - p_y| < PICKR ?
+  LDW R2, [p_y]
+  MOV R0, R1
+  SUB R0, R2
+  CALL absr0
+  CMP R0, #PICKR
+  BGE dp_next
+  LDB R0, [A1+#0]          ; collect: dispatch on type
+  CMP R0, #1
+  BNE dp_food
+  MOV R0, #WPNUSES         ; pipe -> arm (refills durability)
+  STW R0, [p_weapon]
+  MOV R0, #200
+  CALL sfxblip
+  BRA dp_take
+dp_food:
+  LDW R0, [p_hp]           ; food -> heal, capped at full
+  ADD R0, #FOODHP
+  CMP R0, #HP0
+  BLE dp_heal
+  MOV R0, #HP0
+dp_heal:
+  STW R0, [p_hp]
+  MOV R0, #70
+  CALL sfxblip
+dp_take:
+  MOV R0, #0
+  STB R0, [A1+#0]          ; remove the pickup
+dp_next:
+  ADD R7, #1
+  CMP R7, #NPICK
+  BGE dp_end
+  BRA dp_lp               ; long branch back (loop body exceeds short-branch range)
+dp_end:
+  RET
+
+; ---- countalive: R0 = number of live thugs ----
+countalive:
+  MOV R7, #0
+  MOV R6, #0
+ca_lp:
   MOV R3, R7
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ ca_n
+  ADD R6, #1
+ca_n:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT ca_lp
+  MOV R0, R6
+  RET
+
+; ---- nextwave: bump the wave, push the camera limit on by SEG, spawn the group ----
+nextwave:
+  LDW R0, [wave]
+  ADD R0, #1
+  STW R0, [wave]
+  LDW R0, [cammax]
+  ADD R0, #SEG
+  STW R0, [cammax]
+  CALL spawnwave
+  MOV R0, #2               ; reward: a drumstick in the new stretch of street
+  LDW R1, [cammax]
+  ADD R1, #120
+  MOV R2, #120
+  CALL addpickup
+  LDW R0, [wave]           ; on even waves, also drop a fresh pipe
+  AND R0, #1
+  BNE nw_done
+  MOV R0, #1
+  LDW R1, [cammax]
+  ADD R1, #230
+  MOV R2, #170
+  CALL addpickup
+nw_done:
+  RET
+
+; ---- spawnwave: boss wave -> spawnboss; else WAVEN thugs right of the camera limit ----
+spawnwave:
+  LDW R0, [wave]
+  CMP R0, #NORMW
+  BGE spawnboss
+  MOV R0, #EHOLD          ; brief grace before they advance...
+  LDW R1, [wave]
+  CMP R1, #0
+  BNE sw_hold
+  MOV R0, #EHOLD0         ; ...longer for a stage's opening wave
+sw_hold:
+  STW R0, [ehold]
+  MOV R0, #0
+  STW R0, [bossactive]
+  MOV R7, #0
+sw_lp:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #ENEMY
+  ADD A1, R3
+  CMP R7, #WAVEN
+  BGE sw_dead              ; slots past the wave size stay dead
   MOV R0, #1
   STB R0, [A1+#0]
   MOV R0, #ENHP
@@ -828,16 +1657,58 @@ ng_e:
   MOV R0, #0
   STB R0, [A1+#2]
   STB R0, [A1+#3]
-  LDW R0, [A0]
+  LDW R0, [cammax]         ; spawn x = limit + 180 + i*64 (off to the right)
+  ADD R0, #180
+  MOV R2, R7
+  SHL R2, #6
+  ADD R0, R2
   STW R0, [A1+#4]
-  LDW R0, [A0+#2]
+  MOV R0, R7             ; spawn y = 100 + i*32 (spread down the band)
+  SHL R0, #5
+  ADD R0, #100
   STW R0, [A1+#6]
-  ADD A0, #4
+  BRA sw_next
+sw_dead:
+  MOV R0, #0
+  STB R0, [A1+#0]
+sw_next:
   ADD R7, #1
   CMP R7, #NENEM
-  BLT ng_e
+  BLT sw_lp
+  RET
+
+; ---- spawnboss: one boss in slot 0, all other slots idle, boss bar armed ----
+spawnboss:
+  LDA A1, #ENEMY
   MOV R0, #1
-  STW R0, [state]
+  STB R0, [A1+#0]
+  MOV R0, #BOSSHP
+  STB R0, [A1+#1]
+  MOV R0, #0
+  STB R0, [A1+#2]
+  STB R0, [A1+#3]
+  LDW R0, [cammax]         ; boss waits ahead of the camera limit
+  ADD R0, #200
+  STW R0, [A1+#4]
+  MOV R0, #140
+  STW R0, [A1+#6]
+  MOV R7, #1              ; every other slot stays empty
+sb_lp:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #ENEMY
+  ADD A1, R3
+  MOV R0, #0
+  STB R0, [A1+#0]
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT sb_lp
+  MOV R0, #1
+  STW R0, [bossactive]
+  MOV R0, #BOSSHP
+  STW R0, [bossmaxhp]
+  MOV R0, #EHOLD          ; let the boss make an entrance before it charges
+  STW R0, [ehold]
   RET
 
 ; ============================ audio ============================
@@ -930,6 +1801,32 @@ setpal:
   STW R0, [PAL_DATA]
   MOV R0, #$7FFF
   STW R0, [PAL_DATA]
+  MOV R0, #80            ; bank 5: pickups (pipe + food)
+  STB R0, [PAL_INDEX]
+  MOV R0, #$0000
+  STW R0, [PAL_DATA]
+  MOV R0, #$5AD6
+  STW R0, [PAL_DATA]     ; 1 pipe light grey
+  MOV R0, #$294A
+  STW R0, [PAL_DATA]     ; 2 pipe dark grey
+  MOV R0, #$1152
+  STW R0, [PAL_DATA]     ; 3 meat brown
+  MOV R0, #$4B5C
+  STW R0, [PAL_DATA]     ; 4 bone / tan
+  MOV R0, #$139E
+  STW R0, [PAL_DATA]     ; 5 yellow
+  MOV R0, #96            ; bank 6: boss
+  STB R0, [PAL_INDEX]
+  MOV R0, #$0000
+  STW R0, [PAL_DATA]
+  MOV R0, #$6C1C
+  STW R0, [PAL_DATA]     ; 1 boss body (purple)
+  MOV R0, #$2008
+  STW R0, [PAL_DATA]     ; 2 dark
+  MOV R0, #$3A5C
+  STW R0, [PAL_DATA]     ; 3 skin
+  MOV R0, #$7FFF
+  STW R0, [PAL_DATA]     ; 4 white (eyes / flash)
   RET
 
 ; ---- copy the whole tile sheet from ROM into VRAM tile region (offset 0) ----
@@ -949,20 +1846,24 @@ cs_lp:
   RET
 
 ; ============================ data ============================
-espawn:
-  DW 40, 110
-  DW 280, 120
-  DW 70, 170
-  DW 250, 160
-  DW 150, 100
-  DW 300, 180
+; per-stage palette: brick dark, brick light, sidewalk, enemy body (RGB555)
+levelpal:
+  DW $10D6, $215B, $5294, $109E   ; stage 1: red brick, red thugs
+  DW $3042, $40C4, $418C, $609C   ; stage 2: night blue, magenta thugs
+  DW $1142, $1A04, $3254, $0A1E   ; stage 3: industrial green, orange thugs
 
 sTITLE1:
   DB S, T, R, E, E, T, END
 sTITLE2:
   DB B, R, A, W, L, END
+sTAG:
+  DB G, R, A, B, SPC, T, H, E, SPC, P, I, P, E, END
 sSTART:
   DB P, U, S, H, SPC, S, T, A, R, T, END
+sSTAGE:
+  DB S, T, A, G, E, SPC, END
+sREADY:
+  DB G, E, T, SPC, R, E, A, D, Y, END
 sWIN:
   DB Y, O, U, SPC, W, I, N, END
 sOVER:
