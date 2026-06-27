@@ -406,7 +406,7 @@ __mods["cpu/core"]=function(module,exports,require){
 // no cycle table yet (step() counts 1 per instruction).
 
 const isa = require('./isa.js')
-const { unpackRegs, VECTOR_BASE, vectorAddr } = isa
+const { VECTOR_BASE, vectorAddr } = isa
 
 const s8 = v => (v << 24) >> 24
 const s16 = v => (v << 16) >> 16
@@ -498,6 +498,10 @@ class CastlePalmCPU {
     return true
   }
 
+  // Decode the instruction at PC into a { name, opcode, values, length } object.
+  // Retained for tooling/introspection (the disassembler/debugger and tests use
+  // isa.decode directly); step() no longer calls this, so the allocation it does
+  // is off the hot path. The hot loop reads operands inline (see step()).
   fetch() {
     const op = this.read8(this.PC), len = isa.lengthOf(op)
     const buf = new Uint8Array(len)
@@ -505,96 +509,123 @@ class CastlePalmCPU {
     return isa.decode(buf, 0)
   }
 
+  // Allocation-free fetch/decode/execute. Operands are read inline from the bus
+  // (no Uint8Array, no decode object, no `values` array, no per-step register
+  // unpack arrays) and dispatch is on the numeric opcode byte (a dense integer
+  // jump) instead of the decoded string `name`. Semantics — operand order,
+  // sign-extension (s8/s16), flag effects, shift carry reads, and PC math — are
+  // byte-identical to the decode-based reference; tests/determinism.test.js guards
+  // that against every future edit.
   step() {
     if (this.halted || this.waiting) return 0
     const at = this.PC
-    const d = this.fetch()
-    let next = m24(at + d.length)
-    const R = this.R, A = this.A, v = d.values
-    const rp = i => unpackRegs(v[i])
-    switch (d.name) {
-      case 'NOP': break
-      case 'MOV.b': { const [x] = rp(0); R[x] = v[1] & 0xff; break }
-      case 'MOV.i': { const [x] = rp(0); R[x] = m16(v[1]); break }
-      case 'MOV.r': { const [x, y] = rp(0); R[x] = R[y]; break }
-      case 'LDA': { const [x] = rp(0); A[x] = m24(v[1]); break }
-      case 'LDADDR': { const [x, y] = rp(0); A[x] = this.read24(A[y]); break }
-      case 'MOVA': { const [x, y] = rp(0); A[x] = A[y]; break }
+    const R = this.R, A = this.A, F = this.F
+    const op = this.read8(at)
+    let p = m24(at + 1)            // cursor over operands; advances as we read
 
-      case 'LDW.ind': { const [x, a] = rp(0); R[x] = this.read16(A[a]); break }
-      case 'LDW.dsp': { const [x, a] = rp(0); R[x] = this.read16(m24(A[a] + s8(v[1]))); break }
-      case 'LDW.idx': { const [x, a] = rp(0); const [m] = rp(1); R[x] = this.read16(m24(A[a] + s16(R[m]))); break }
-      case 'LDW.abs': { const [x] = rp(0); R[x] = this.read16(v[1]); break }
-      case 'LDB.ind': { const [x, a] = rp(0); R[x] = this.read8(A[a]); break }
-      case 'LDB.dsp': { const [x, a] = rp(0); R[x] = this.read8(m24(A[a] + s8(v[1]))); break }
-      case 'LDB.idx': { const [x, a] = rp(0); const [m] = rp(1); R[x] = this.read8(m24(A[a] + s16(R[m]))); break }
-      case 'LDB.abs': { const [x] = rp(0); R[x] = this.read8(v[1]); break }
-      case 'STW.ind': { const [x, a] = rp(0); this.write16(A[a], R[x]); break }
-      case 'STW.dsp': { const [x, a] = rp(0); this.write16(m24(A[a] + s8(v[1])), R[x]); break }
-      case 'STW.idx': { const [x, a] = rp(0); const [m] = rp(1); this.write16(m24(A[a] + s16(R[m])), R[x]); break }
-      case 'STW.abs': { const [x] = rp(0); this.write16(v[1], R[x]); break }
-      case 'STB.ind': { const [x, a] = rp(0); this.write8(A[a], R[x]); break }
-      case 'STB.dsp': { const [x, a] = rp(0); this.write8(m24(A[a] + s8(v[1])), R[x]); break }
-      case 'STB.idx': { const [x, a] = rp(0); const [m] = rp(1); this.write8(m24(A[a] + s16(R[m])), R[x]); break }
-      case 'STB.abs': { const [x] = rp(0); this.write8(v[1], R[x]); break }
+    // inline operand readers (advance p, no allocation). The regs byte packs the
+    // first operand in the hi nibble (x/a) and the second in the lo nibble (y/m/b).
+    let rb = 0, x = 0, y = 0
+    const readRegs = () => { rb = this.read8(p); p = m24(p + 1); x = (rb >> 4) & 0xf; y = rb & 0xf }
+    const readImm8 = () => { const t = this.read8(p); p = m24(p + 1); return t }
+    const readImm16 = () => { const t = this.read16(p); p = m24(p + 2); return t }
+    const readAddr24 = () => { const t = this.read24(p); p = m24(p + 3); return t }
 
-      case 'ADD.r': { const [x, y] = rp(0); R[x] = this.add16(R[x], R[y]); break }
-      case 'ADD.i': { const [x] = rp(0); R[x] = this.add16(R[x], m16(v[1])); break }
-      case 'SUB.r': { const [x, y] = rp(0); R[x] = this.sub16(R[x], R[y]); break }
-      case 'SUB.i': { const [x] = rp(0); R[x] = this.sub16(R[x], m16(v[1])); break }
-      case 'ADC.r': { const [x, y] = rp(0); R[x] = this.adc16(R[x], R[y]); break }
-      case 'SBC.r': { const [x, y] = rp(0); R[x] = this.sbc16(R[x], R[y]); break }
-      case 'CMP.r': { const [x, y] = rp(0); this.sub16(R[x], R[y]); break }
-      case 'CMP.i': { const [x] = rp(0); this.sub16(R[x], m16(v[1])); break }
-      case 'NEG': { const [x] = rp(0); R[x] = this.sub16(0, R[x]); break }
-      case 'AND.r': { const [x, y] = rp(0); R[x] = this.logic(R[x] & R[y]); break }
-      case 'AND.i': { const [x] = rp(0); R[x] = this.logic(R[x] & m16(v[1])); break }
-      case 'OR.r': { const [x, y] = rp(0); R[x] = this.logic(R[x] | R[y]); break }
-      case 'OR.i': { const [x] = rp(0); R[x] = this.logic(R[x] | m16(v[1])); break }
-      case 'XOR.r': { const [x, y] = rp(0); R[x] = this.logic(R[x] ^ R[y]); break }
-      case 'XOR.i': { const [x] = rp(0); R[x] = this.logic(R[x] ^ m16(v[1])); break }
-      case 'NOT': { const [x] = rp(0); R[x] = this.logic(~R[x]); break }
-      case 'BIT.r': { const [x, y] = rp(0); this.logic(R[x] & R[y]); break }
-      case 'TST': { const [x] = rp(0); this.logic(R[x]); break }
-      case 'SHL.i': { const [x] = rp(0); const n = v[1] & 15; this.F.c = n ? !!(R[x] & (1 << (16 - n))) : this.F.c; R[x] = this.logic(R[x] << n) }
-        break
-      case 'SHR.i': { const [x] = rp(0); const n = v[1] & 15; this.F.c = n ? !!(R[x] & (1 << (n - 1))) : this.F.c; R[x] = this.logic(R[x] >>> n) }
-        break
-      case 'SAR.i': { const [x] = rp(0); const n = v[1] & 15; this.F.c = n ? !!(R[x] & (1 << (n - 1))) : this.F.c; R[x] = this.logic(s16(R[x]) >> n) }
-        break
-      case 'SHL.r': { const [x, y] = rp(0); R[x] = this.logic(R[x] << (R[y] & 15)); break }
-      case 'SHR.r': { const [x, y] = rp(0); R[x] = this.logic(R[x] >>> (R[y] & 15)); break }
-      case 'SAR.r': { const [x, y] = rp(0); R[x] = this.logic(s16(R[x]) >> (R[y] & 15)); break }
+    let next                       // set only by control flow; otherwise = address after operands
+    switch (op) {
+      case 0x00: break                                                            // NOP
+      case 0x01: { readRegs(); const i = readImm16(); R[x] = m16(i); break }       // MOV.i
+      case 0x02: { readRegs(); const i = readImm8(); R[x] = i & 0xff; break }      // MOV.b
+      case 0x03: { readRegs(); R[x] = R[y]; break }                               // MOV.r
+      case 0x04: { readRegs(); const a = readAddr24(); A[x] = m24(a); break }      // LDA
+      case 0x05: { readRegs(); A[x] = this.read24(A[y]); break }                  // LDADDR
+      case 0x06: { readRegs(); A[x] = A[y]; break }                              // MOVA
 
-      case 'ADDA.i': { const [a] = rp(0); A[a] = m24(A[a] + s16(v[1])); break }
-      case 'ADDA.r': { const [a, m] = rp(0); A[a] = m24(A[a] + s16(R[m])); break }
-      case 'INCA': { const [a] = rp(0); A[a] = m24(A[a] + 1); break }
-      case 'DECA': { const [a] = rp(0); A[a] = m24(A[a] - 1); break }
-      case 'CMPA': { const [a, b] = rp(0); this.F.z = A[a] === A[b]; this.F.c = A[a] >= A[b]; break }
+      case 0x10: { readRegs(); R[x] = this.read16(A[y]); break }                                   // LDW.ind
+      case 0x11: { readRegs(); const d = readImm8(); R[x] = this.read16(m24(A[y] + s8(d))); break } // LDW.dsp
+      case 0x12: { readRegs(); const m = (this.read8(p) >> 4) & 0xf; p = m24(p + 1); R[x] = this.read16(m24(A[y] + s16(R[m]))); break } // LDW.idx
+      case 0x13: { readRegs(); const a = readAddr24(); R[x] = this.read16(a); break }               // LDW.abs
+      case 0x14: { readRegs(); R[x] = this.read8(A[y]); break }                                     // LDB.ind
+      case 0x15: { readRegs(); const d = readImm8(); R[x] = this.read8(m24(A[y] + s8(d))); break }  // LDB.dsp
+      case 0x16: { readRegs(); const m = (this.read8(p) >> 4) & 0xf; p = m24(p + 1); R[x] = this.read8(m24(A[y] + s16(R[m]))); break } // LDB.idx
+      case 0x17: { readRegs(); const a = readAddr24(); R[x] = this.read8(a); break }                // LDB.abs
+      case 0x18: { readRegs(); this.write16(A[y], R[x]); break }                                    // STW.ind
+      case 0x19: { readRegs(); const d = readImm8(); this.write16(m24(A[y] + s8(d)), R[x]); break } // STW.dsp
+      case 0x1a: { readRegs(); const m = (this.read8(p) >> 4) & 0xf; p = m24(p + 1); this.write16(m24(A[y] + s16(R[m])), R[x]); break } // STW.idx
+      case 0x1b: { readRegs(); const a = readAddr24(); this.write16(a, R[x]); break }               // STW.abs
+      case 0x1c: { readRegs(); this.write8(A[y], R[x]); break }                                     // STB.ind
+      case 0x1d: { readRegs(); const d = readImm8(); this.write8(m24(A[y] + s8(d)), R[x]); break }  // STB.dsp
+      case 0x1e: { readRegs(); const m = (this.read8(p) >> 4) & 0xf; p = m24(p + 1); this.write8(m24(A[y] + s16(R[m])), R[x]); break } // STB.idx
+      case 0x1f: { readRegs(); const a = readAddr24(); this.write8(a, R[x]); break }                // STB.abs
 
-      case 'BRA': next = m24(next + s16(v[0])); break
-      case 'BEQ': case 'BNE': case 'BCS': case 'BCC': case 'BMI': case 'BPL':
-      case 'BVS': case 'BVC': case 'BLT': case 'BGE': case 'BGT': case 'BLE':
-      case 'BHI': case 'BLS': if (this.cond(d.name)) next = m24(next + s8(v[0])); break
-      case 'JMP.abs': next = v[0]; break
-      case 'JMP.ind': { const [a] = rp(0); next = A[a]; break }
-      case 'CALL.abs': this.push24(next); next = v[0]; break
-      case 'CALL.ind': { const [a] = rp(0); this.push24(next); next = A[a]; break }
-      case 'RET': next = this.pop24(); break
+      case 0x30: { readRegs(); R[x] = this.add16(R[x], R[y]); break }                  // ADD.r
+      case 0x31: { readRegs(); const i = readImm16(); R[x] = this.add16(R[x], m16(i)); break } // ADD.i
+      case 0x32: { readRegs(); R[x] = this.sub16(R[x], R[y]); break }                  // SUB.r
+      case 0x33: { readRegs(); const i = readImm16(); R[x] = this.sub16(R[x], m16(i)); break } // SUB.i
+      case 0x34: { readRegs(); R[x] = this.adc16(R[x], R[y]); break }                  // ADC.r
+      case 0x35: { readRegs(); R[x] = this.sbc16(R[x], R[y]); break }                  // SBC.r
+      case 0x36: { readRegs(); this.sub16(R[x], R[y]); break }                         // CMP.r
+      case 0x37: { readRegs(); const i = readImm16(); this.sub16(R[x], m16(i)); break }// CMP.i
+      case 0x38: { readRegs(); R[x] = this.sub16(0, R[x]); break }                     // NEG
+      case 0x39: { readRegs(); R[x] = this.logic(R[x] & R[y]); break }                 // AND.r
+      case 0x3a: { readRegs(); const i = readImm16(); R[x] = this.logic(R[x] & m16(i)); break } // AND.i
+      case 0x3b: { readRegs(); R[x] = this.logic(R[x] | R[y]); break }                 // OR.r
+      case 0x3c: { readRegs(); const i = readImm16(); R[x] = this.logic(R[x] | m16(i)); break } // OR.i
+      case 0x3d: { readRegs(); R[x] = this.logic(R[x] ^ R[y]); break }                 // XOR.r
+      case 0x3e: { readRegs(); const i = readImm16(); R[x] = this.logic(R[x] ^ m16(i)); break } // XOR.i
+      case 0x3f: { readRegs(); R[x] = this.logic(~R[x]); break }                       // NOT
+      case 0x40: { readRegs(); this.logic(R[x] & R[y]); break }                        // BIT.r
+      case 0x41: { readRegs(); this.logic(R[x]); break }                              // TST
+      case 0x42: { readRegs(); const n = readImm8() & 15; F.c = n ? !!(R[x] & (1 << (16 - n))) : F.c; R[x] = this.logic(R[x] << n); break }  // SHL.i
+      case 0x43: { readRegs(); const n = readImm8() & 15; F.c = n ? !!(R[x] & (1 << (n - 1))) : F.c; R[x] = this.logic(R[x] >>> n); break }  // SHR.i
+      case 0x44: { readRegs(); const n = readImm8() & 15; F.c = n ? !!(R[x] & (1 << (n - 1))) : F.c; R[x] = this.logic(s16(R[x]) >> n); break } // SAR.i
+      case 0x45: { readRegs(); R[x] = this.logic(R[x] << (R[y] & 15)); break }         // SHL.r
+      case 0x46: { readRegs(); R[x] = this.logic(R[x] >>> (R[y] & 15)); break }        // SHR.r
+      case 0x47: { readRegs(); R[x] = this.logic(s16(R[x]) >> (R[y] & 15)); break }    // SAR.r
 
-      case 'PUSH': { const [x] = rp(0); this.push16(R[x]); break }
-      case 'POP': { const [x] = rp(0); R[x] = this.pop16(); break }
-      case 'PUSHA': { const [a] = rp(0); this.push24(A[a]); break }
-      case 'POPA': { const [a] = rp(0); A[a] = this.pop24(); break }
-      case 'IRET': next = this.pop24(); this.loadStatus(this.pop16()); break
+      case 0x48: { readRegs(); const i = readImm16(); A[x] = m24(A[x] + s16(i)); break } // ADDA.i
+      case 0x49: { readRegs(); A[x] = m24(A[x] + s16(R[y])); break }                     // ADDA.r
+      case 0x4a: { readRegs(); A[x] = m24(A[x] + 1); break }                             // INCA
+      case 0x4b: { readRegs(); A[x] = m24(A[x] - 1); break }                             // DECA
+      case 0x4c: { readRegs(); F.z = A[x] === A[y]; F.c = A[x] >= A[y]; break }          // CMPA
 
-      case 'HALT': this.halted = true; next = at; break
-      case 'WAIT': this.waiting = true; break  // advances; the frame loop clears `waiting` at vblank
-      case 'EI': this.ie = true; break
-      case 'DI': this.ie = false; break
-      default: throw new Error('unimplemented instruction ' + d.name)
+      // branch displacement base = address after the operand (cursor p)
+      case 0x50: { const d = readImm16(); next = m24(m24(p) + s16(d)); break }                       // BRA (disp16)
+      case 0x51: { const d = readImm8(); next = F.z ? m24(p + s8(d)) : m24(p); break }               // BEQ
+      case 0x52: { const d = readImm8(); next = !F.z ? m24(p + s8(d)) : m24(p); break }              // BNE
+      case 0x53: { const d = readImm8(); next = F.c ? m24(p + s8(d)) : m24(p); break }               // BCS
+      case 0x54: { const d = readImm8(); next = !F.c ? m24(p + s8(d)) : m24(p); break }              // BCC
+      case 0x55: { const d = readImm8(); next = F.n ? m24(p + s8(d)) : m24(p); break }               // BMI
+      case 0x56: { const d = readImm8(); next = !F.n ? m24(p + s8(d)) : m24(p); break }              // BPL
+      case 0x57: { const d = readImm8(); next = F.v ? m24(p + s8(d)) : m24(p); break }               // BVS
+      case 0x58: { const d = readImm8(); next = !F.v ? m24(p + s8(d)) : m24(p); break }              // BVC
+      case 0x59: { const d = readImm8(); next = (F.n !== F.v) ? m24(p + s8(d)) : m24(p); break }     // BLT
+      case 0x5a: { const d = readImm8(); next = (F.n === F.v) ? m24(p + s8(d)) : m24(p); break }     // BGE
+      case 0x5b: { const d = readImm8(); next = (!F.z && (F.n === F.v)) ? m24(p + s8(d)) : m24(p); break } // BGT
+      case 0x5c: { const d = readImm8(); next = (F.z || (F.n !== F.v)) ? m24(p + s8(d)) : m24(p); break }  // BLE
+      case 0x5d: { const d = readImm8(); next = (F.c && !F.z) ? m24(p + s8(d)) : m24(p); break }     // BHI
+      case 0x5e: { const d = readImm8(); next = (!F.c || F.z) ? m24(p + s8(d)) : m24(p); break }     // BLS
+
+      case 0x60: { const a = readAddr24(); next = a; break }                            // JMP.abs
+      case 0x61: { readRegs(); next = A[x]; break }                                     // JMP.ind
+      case 0x62: { const a = readAddr24(); this.push24(m24(p)); next = a; break }        // CALL.abs
+      case 0x63: { readRegs(); this.push24(m24(p)); next = A[x]; break }                 // CALL.ind
+      case 0x64: { next = this.pop24(); break }                                          // RET
+
+      case 0x70: { readRegs(); this.push16(R[x]); break }                               // PUSH
+      case 0x71: { readRegs(); R[x] = this.pop16(); break }                             // POP
+      case 0x72: { readRegs(); this.push24(A[x]); break }                              // PUSHA
+      case 0x73: { readRegs(); A[x] = this.pop24(); break }                            // POPA
+      case 0x74: { next = this.pop24(); this.loadStatus(this.pop16()); break }           // IRET
+
+      case 0x75: this.halted = true; next = at; break                                   // HALT (re-executes its own address)
+      case 0x76: this.waiting = true; break                                             // WAIT (advances; frame loop clears `waiting` at vblank)
+      case 0x77: this.ie = true; break                                                  // EI
+      case 0x78: this.ie = false; break                                                 // DI
+      default: throw new Error('unimplemented opcode 0x' + op.toString(16))
     }
-    this.PC = next
+
+    this.PC = (next === undefined) ? m24(p) : next
     this.steps++
     return 1
   }
