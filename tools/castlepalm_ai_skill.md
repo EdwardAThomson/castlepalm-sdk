@@ -21,7 +21,40 @@ The authoritative spec lives in the SDK repo:
 for the PNG asset flow. The smallest complete program is `examples/hello.asm`; start a
 new cart from `template/game.asm`.
 
-## 2. The machine at a glance
+## 2. Game design: gentle start, then ramp (default to this)
+
+A finished game is a **difficulty curve, not a feature dump**. Default to a gentle
+on-ramp that hooks the player, then escalate as they gain skill. Do NOT cram every
+mechanic, enemy, and hazard into the first level: that is the most common reason a good
+game feels unfair and players bounce off it.
+
+Apply unless the user asks otherwise:
+
+- **Aim for ~5+ levels/stages/zones,** not one overloaded level.
+- **Introduce one mechanic at a time** — each new enemy/hazard/move gets its own gentle,
+  survivable introduction before it is combined with others.
+- **The first minute must be winnable and fun.** Early levels are an unspoken tutorial:
+  wide platforms / few hazards / slow, sparse, non-firing enemies. Let the player feel
+  competent before you pressure them.
+- **Escalate deliberately** across stages (enemy count, speed, fire rate, hazard
+  density, combinations). Keep a difficulty value and scale from it rather than
+  hand-placing a brutal opener.
+- **Forgiving early, tighter later:** generous lives / i-frames / checkpoints /
+  coyote-time at the start; pull them back as stages advance.
+- **Reserve the hardest content** (bosses, bullet-walls, instant-death gaps, combined
+  hazards) for later stages, gated behind what the player has already learned.
+
+By genre: a **shmup**'s wave script should open chaff-only and widely staggered, holding
+aimed/spread/ring fire and the boss for later; a **platformer**'s first level should have
+solid ground and no instant-death pit at spawn, adding spikes, then enemies, then
+combined hazards one stage at a time; a **racer** should start wide, gentle, and
+straight, adding curves then hazards then rivals across tracks.
+
+When asked to "make a game," design the curve first (how many stages, what each one
+introduces), then build. When tuning an existing game, ease the opening and check the
+ramp before touching late-game balance.
+
+## 3. The machine at a glance
 
 - **Screen:** 320×224, ~60 fps, rendered per scanline.
 - **Tiles:** 8×8 at 4 bits-per-pixel (16 colours), **32 bytes each**; tile *N*'s pixels
@@ -35,7 +68,7 @@ new cart from `template/game.asm`.
 - **Audio:** 2 square + 1 noise channel (deterministic, 48000 Hz mono per frame).
 - **Deterministic:** identical input always yields identical frames (great for tests).
 
-## 3. CPU
+## 4. CPU
 
 - **Registers:** `R0`–`R7` (16-bit general; arithmetic is 16-bit), `A0`–`A3` (24-bit
   address/pointer registers), `PC` (24-bit), `SP` (24-bit, descending), flags `Z N C V`.
@@ -68,7 +101,7 @@ Load a full 24-bit address with `LDA An, #addr` (e.g. `LDA A0, #mytable`).
 - **System:** `WAIT` (sleep until next frame/vblank — the normal way to pace to 60 fps) ·
   `HALT` · `NOP` · `DI`/`EI`
 
-## 4. Memory map (flat, little-endian, 24-bit)
+## 5. Memory map (flat, little-endian, 24-bit)
 
 | Range | Region | Use |
 | --- | --- | --- |
@@ -82,7 +115,7 @@ Load a full 24-bit address with `LDA An, #addr` (e.g. `LDA A0, #mytable`).
 VRAM (128 KiB), OAM (1 KiB), and palette RAM (512 B) are **PPU-owned and not in CPU
 space** — reach them only via the PPU port window or DMA. Reserved gaps fault, not alias.
 
-## 5. MMIO you will use most
+## 6. MMIO you will use most
 
 **Input** (`LDW R0, [INPUT]`, a held-button bitmask):
 `INPUT $100000`, `INPUT1 $100002`.
@@ -109,7 +142,7 @@ bulk transfers (tile sheets, OAM lists, palettes).
 `SQ0_CTRL` (bit0 enable); `SQ1_*` at `$102004`; `NOISE_PERIOD $102008`,
 `NOISE_VOL $10200A`, `NOISE_CTRL $10200B`.
 
-## 6. Cartridge shape
+## 7. Cartridge shape
 
 Code lives at `ORG $300000`. The first four `DA` words are the **vector table**:
 reset first, then three IRQ vectors (`0` = unused). The CPU jumps to the reset vector
@@ -130,7 +163,7 @@ loop:
   BRA loop
 ```
 
-## 7. The gotchas that bite first (from `docs/GOTCHAS.md`)
+## 8. The gotchas that bite first (from `docs/GOTCHAS.md`)
 
 1. **Immediates need `#`.** `MOV R0, #5` (literal) vs `MOV R0, 5` (wrong — address context).
 2. **Displacement needs `#` too:** `STW R0, [A1+#2]`. Without it, `2` parses as an index register.
@@ -140,9 +173,9 @@ loop:
 5. **`SHR` is logical; use `SAR` for signed** right shifts (dividing a signed value by 2ⁿ).
 6. **Bytes vs words:** `LDB`/`STB` = 8-bit, `LDW`/`STW` = 16-bit. Match width to data
    (a 16-bit coordinate needs `STW`).
-7. **The header is the vector table** (see §6). Forgetting it means the CPU starts nowhere useful.
+7. **The header is the vector table** (see §7). Forgetting it means the CPU starts nowhere useful.
 
-## 8. Build, run, iterate
+## 9. Build, run, iterate
 
 ```sh
 # assemble a cart
@@ -159,7 +192,7 @@ node tools/run.js mygame.asm 60 shot.png --start
 `ship.bin` (tile bytes), `ship.pal.asm` (RGB555 palette), and `ship.json`. In the cart,
 `INCBIN "ship.bin"` to embed the tiles. Full workflow in `docs/MAKING_ART.md`.
 
-## 9. Working method
+## 10. Working method
 
 - Read `docs/GOTCHAS.md` and `examples/hello.asm` before writing anything non-trivial.
 - Keep the per-frame loop tight: read input → update state in Work RAM → push OAM/VRAM
