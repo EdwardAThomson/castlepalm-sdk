@@ -22,9 +22,12 @@ per wave (see the `wavedef` table):
 
 | Type | Look | Behaviour |
 | --- | --- | --- |
-| **Grunt** | stage-coloured (red / magenta / orange) | average speed and toughness |
-| **Runner** | teal | fast but fragile — rushes you, drops in one pipe hit |
-| **Bruiser** | brown | slow (moves every other frame) but tanky and hits for double |
+| **Grunt** | average build, stage-coloured (red / magenta / orange) | average speed and toughness |
+| **Runner** | lean, teal — headband and a sprinter's stance | fast but fragile — rushes you, drops in one pipe hit |
+| **Bruiser** | hulking, brown — wide shoulders, fills the tile | slow (moves every other frame) but tanky and hits for double |
+
+Each type has its own **16×16 silhouette**, not just a recolour, so you can read the
+threat at a glance.
 
 Hits land with a brief **hit-stop** freeze and the camera **shakes** when you take a
 blow or drop an enemy, and a looping chiptune riff plays underneath (square-1; the
@@ -73,8 +76,9 @@ it into Castle Arcade.
 - **Enemy types** are data-driven. A per-type stat table (`TYPEHP`/`TYPESPD`/
   `TYPEDMG`/`TYPEBANK`) and a per-wave `wavedef` table describe who spawns where, so
   tuning difficulty or adding a wave is a data edit, not new code. The type lives in
-  a parallel `ETYPE[]` array so the enemy slot keeps its tight 8-byte stride, and
-  each type is a palette swap (no extra tiles) — classic beat-'em-up recolouring.
+  a parallel `ETYPE[]` array so the enemy slot keeps its tight 8-byte stride. Each
+  type has its own 16×16 silhouette (picked via `TYPETILE`) and palette bank
+  (`TYPEBANK`, recoloured per stage) — so they differ in both shape and colour.
 - **Feel.** A `hitstop` counter freezes the whole scene for a few frames on impact;
   a `shakeT` counter adds a decaying horizontal camera jitter (folded into the same
   `cam` value the sprites and scroll already read). A tiny sequencer (`musictick`)

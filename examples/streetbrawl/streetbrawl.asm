@@ -62,8 +62,10 @@ BHP_FULL EQU 9          ; boss health-bar cell
 PL_WALKA EQU 16
 PL_WALKB EQU 20
 PL_PUNCH EQU 24
-EN_WALKA EQU 32
+EN_WALKA EQU 32         ; grunt walk frames (A, and B at +4)
 EN_WALKB EQU 36
+EN2_WALKA EQU 112       ; runner walk frames (lean silhouette)
+EN3_WALKA EQU 120       ; bruiser walk frames (bulky silhouette)
 WEAPON   EQU 40         ; pipe pickup / held weapon (16x16)
 FOOD     EQU 44         ; food pickup (16x16)
 BOSS     EQU 48         ; boss (16x16)
@@ -891,21 +893,23 @@ ee_on:
   LDW R2, [bossactive]    ; during a boss wave the lone live thug is the boss
   CMP R2, #0
   BNE ee_boss
-  MOV R5, #EN_WALKA       ; simple two-frame shuffle keyed to world x
-  MOV R2, R4
-  SHR R2, #2
-  AND R2, #1
-  BEQ ee_tile
-  MOV R5, #EN_WALKB
-ee_tile:
   PUSH R0                ; save screen x across the type lookup
   CALL curtype          ; R0 = enemy type
-  LDA A0, #TYPEBANK
+  LDA A0, #TYPETILE     ; per-type walk-frame-A tile base (distinct silhouettes)
   ADD A0, R0
-  LDB R0, [A0]          ; palette bank for this type
+  LDB R5, [A0]
+  LDA A0, #TYPEBANK     ; per-type palette bank
+  ADD A0, R0
+  LDB R0, [A0]
   MOV R6, #$10          ; size16
   OR R6, R0             ; | palette bank  (grunt=2, runner=7, bruiser=8)
   POP R0                ; restore screen x
+  MOV R2, R4            ; two-frame walk shuffle keyed to world x
+  SHR R2, #2
+  AND R2, #1
+  BEQ ee_tile
+  ADD R5, #4            ; frame B lives 4 tiles after frame A
+ee_tile:
   LDB R2, [A1+#2]        ; staggered -> flash palette bank 4
   CMP R2, #0
   BEQ ee_face
@@ -1415,17 +1419,22 @@ titlesprites:
   MOV R5, #FOOD
   MOV R6, #$15
   CALL emittile
-  MOV R0, #180           ; thug (art already faces left, toward the hero)
+  MOV R0, #164           ; grunt (art already faces left, toward the hero)
   MOV R1, #160
   MOV R5, #EN_WALKA
   MOV R6, #$12
   CALL emittile
-  MOV R0, #212           ; second thug
+  MOV R0, #192           ; runner (lean, teal)
   MOV R1, #160
-  MOV R5, #EN_WALKB
-  MOV R6, #$12
+  MOV R5, #EN2_WALKA
+  MOV R6, #$17
   CALL emittile
-  MOV R0, #246           ; the boss
+  MOV R0, #220           ; bruiser (bulky, brown)
+  MOV R1, #158
+  MOV R5, #EN3_WALKA
+  MOV R6, #$18
+  CALL emittile
+  MOV R0, #250           ; the boss
   MOV R1, #156
   MOV R5, #BOSS
   MOV R6, #$16
@@ -2090,6 +2099,8 @@ TYPEDMG:                         ; contact damage
   DB 1, 1, 2
 TYPEBANK:                        ; sprite palette bank
   DB 2, 7, 8
+TYPETILE:                        ; walk-frame-A tile base (distinct silhouette per type)
+  DB EN_WALKA, EN2_WALKA, EN3_WALKA
 
 ; ---- wave descriptors: NLEVELS*NORMW rows, NENEM type bytes each (NONE = empty).
 ;      Row index = level*NORMW + wave. Difficulty ramps across the stages. ----

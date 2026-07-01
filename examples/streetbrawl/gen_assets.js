@@ -21,13 +21,15 @@ const T = {
   BRICK: 1, SIDEWALK: 2, ROAD: 3, CURB: 4, HP_FULL: 5, HP_EMPTY: 6, WIN_TILE: 7,
   WPN_ICON: 8, BHP_FULL: 9,                   // 8x8 HUD: armed icon, boss-bar cell
   PL_WALKA: 16, PL_WALKB: 20, PL_PUNCH: 24,   // player 16x16 frames (4 tiles each)
-  EN_WALKA: 32, EN_WALKB: 36,                 // enemy 16x16 frames
+  EN_WALKA: 32, EN_WALKB: 36,                 // grunt 16x16 frames
   WEAPON: 40, FOOD: 44, BOSS: 48,             // pickups + boss (16x16 each)
   WEAPON_UP: 52,                              // pipe mid-swing (raised diagonal)
   FONT: 64,                                   // FONT + (letter 0..25)
   DIGIT: 96,                                  // DIGIT + (0..9)
+  EN2_WALKA: 112, EN2_WALKB: 116,             // runner 16x16 frames (lean silhouette)
+  EN3_WALKA: 120, EN3_WALKB: 124,             // bruiser 16x16 frames (bulky silhouette)
 }
-const SHEET_TILES = 112           // tiles 0..111 -> 112*32 = 3584 bytes
+const SHEET_TILES = 128           // tiles 0..127 -> 128*32 = 4096 bytes
 const sheet = new Uint8Array(SHEET_TILES * 32)
 
 const put = (idx, bytes) => sheet.set(bytes, idx * 32)
@@ -195,6 +197,84 @@ put16(T.EN_WALKB, tile16([
   '..rr....rr......',
   '..dd....dd.....',
   '................',
+], EMAP))
+
+// ---- runner 16x16: lean, forward-leaning sprinter with a headband. Same EMAP so
+//      the type palettes (bank 7) recolour it. Distinctly slimmer than the grunt. ----
+put16(T.EN2_WALKA, tile16([
+  '................',
+  '....dddd........',
+  '...dkkkkd.......',
+  '...dddddd.......',   // headband
+  '...dwkkkd.......',
+  '....dkkd........',
+  '....drrd........',
+  '...drrrrd.......',
+  '..drrrrd........',   // torso leaning left, trailing arm back
+  '.drrrd..........',
+  '..drrd..........',
+  '...drd..........',
+  '..dr.rd.........',   // legs split mid-stride
+  '.dr...rd........',
+  '.d.....d........',
+  '................',
+], EMAP))
+put16(T.EN2_WALKB, tile16([
+  '................',
+  '....dddd........',
+  '...dkkkkd.......',
+  '...dddddd.......',
+  '...dwkkkd.......',
+  '....dkkd........',
+  '....drrd........',
+  '...drrrrd.......',
+  '...drrrrd.......',   // more upright, opposite stride
+  '..drrrrd........',
+  '...drrd.........',
+  '...drd..........',
+  '...drrd.........',
+  '..dr..d.........',
+  '..d...dd........',
+  '................',
+], EMAP))
+
+// ---- bruiser 16x16: hulking, wide-shouldered brute (palette bank 8). Fills the
+//      whole tile so it reads as much bigger than the grunt/runner. ----
+put16(T.EN3_WALKA, tile16([
+  '......dddd......',
+  '.....dkkkkd.....',
+  '.....dwkkkd.....',
+  '.....dkkkkd.....',
+  '....dddddddd....',   // thick neck / traps
+  '..dddddddddddd..',   // huge shoulders
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..ddrrrrrrrrdd..',
+  '...drrrrrrrrd...',
+  '...dd.rrrr.dd...',   // thick legs planted wide
+  '..drr......rrd..',
+  '..dd........dd..',
+], EMAP))
+put16(T.EN3_WALKB, tile16([
+  '......dddd......',
+  '.....dkkkkd.....',
+  '.....dwkkkd.....',
+  '.....dkkkkd.....',
+  '....dddddddd....',
+  '..dddddddddddd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..drrrrrrrrrrd..',
+  '..ddrrrrrrrrdd..',
+  '...drrrrrrrrd...',
+  '....drrrrrrd....',   // weight shifts, feet closer
+  '...drr....rrd...',
+  '...dd......dd...',
 ], EMAP))
 
 // ---- pickups 16x16 (palette bank 5: 1 pipe-light, 2 pipe-dark, 3 meat, 4 bone) ----
