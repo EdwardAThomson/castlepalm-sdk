@@ -12,6 +12,7 @@ implemented by the engine, within the [MEMORY_MAP.md](MEMORY_MAP.md) windows.
 | `$100010` | `IRQ_FLAGS` | read / write-1-clear | bit0 = vblank, bit1 = hblank (occurred since last clear) |
 | `$100012` | `IRQ_ENABLE` | write | bit0 = vblank enable, bit1 = hblank enable |
 | `$100014` | `FRAME` | read u16 | frame counter |
+| `$100016` | `SAVE_COMMIT` | write u8 | poke nonzero once save RAM (`$200000+`) holds a coherent record; the host drains this and persists the save. Lets the host store whole records, not torn multi-byte writes. |
 | `$100020` | `DMA_SRC` | write 3 bytes | 24-bit source address in CPU space |
 | `$100024` | `DMA_DST` | write u16 | destination offset within the destination space |
 | `$100028` | `DMA_LEN` | write u16 | byte length |

@@ -40,6 +40,12 @@ SQ0_CTRL   EQU $102003
 SQ1_PERIOD EQU $102004    ; square 1 — reserved for the music loop (SFX use SQ0)
 SQ1_VOL    EQU $102006
 SQ1_CTRL   EQU $102007
+SAVECOMMIT EQU $100016    ; poke nonzero once save RAM holds a coherent record; host persists it
+
+; ---- cartridge save RAM ($200000-$207FFF): a per-browser best-kills high score ----
+SV_MAG   EQU $200000      ; u16 marker word (SVMAGIC = a valid Street Brawl save)
+SV_BEST  EQU $200002      ; u16 best kills across runs
+SVMAGIC  EQU $B501        ; distinctive non-zero marker (fresh save RAM is all zeros)
 
 ; ---- input bits ----
 UP    EQU 1
@@ -155,6 +161,8 @@ hitstop  EQU $00015C    ; hit-freeze countdown (whole game pauses)
 mIdx     EQU $00015E    ; music: current note index
 mT       EQU $000160    ; music: frames left on the current note
 eidx     EQU $000162    ; index of the enemy currently being processed (type lookups)
+best     EQU $000164    ; best kills across runs (loaded from save RAM at boot)
+svrem    EQU $000166    ; scratch: running value during decimal-digit extraction
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
 hbx1     EQU $000132
 hby0     EQU $000134
@@ -217,6 +225,7 @@ start:
   STW R0, [hitstop]
   STW R0, [mIdx]           ; start the music loop from the top
   STW R0, [mT]
+  CALL loadsave            ; restore best-kills from cartridge save RAM (0 if none)
   CALL drawtitle
   MOV R0, #0
   STW R0, [state]
@@ -306,6 +315,7 @@ pf_nbb:
   BNE pf_ckwin
   MOV R0, #3
   STW R0, [state]
+  CALL savebest            ; commit a new best-kills if this run beat it
   CALL clearoam
   CALL drawover
   RET
@@ -333,6 +343,7 @@ pf_pausetick:
   BLT pf_inter             ; more stages -> interstitial
   MOV R0, #2               ; final boss down -> WIN
   STW R0, [state]
+  CALL savebest            ; a winning run also records its kills
   CALL clearoam
   CALL drawwin
   RET
@@ -1331,6 +1342,73 @@ menureset:
   CALL clearhp
   RET
 
+; ============================ save RAM (best-kills) ============================
+; ---- loadsave: restore best-kills from cartridge save RAM. Fresh (zeroed) save
+;      RAM carries no marker, so best starts at 0. ----
+loadsave:
+  LDW R0, [SV_MAG]
+  MOV R1, #SVMAGIC
+  CMP R0, R1
+  BNE ld_fresh
+  LDW R0, [SV_BEST]
+  STW R0, [best]
+  RET
+ld_fresh:
+  MOV R0, #0
+  STW R0, [best]
+  RET
+
+; ---- savebest: if this run's kills beat the stored best, update it, write a
+;      coherent record into save RAM, then poke SAVECOMMIT so the host persists it. ----
+savebest:
+  LDW R0, [kills]
+  LDW R1, [best]
+  CMP R0, R1
+  BLS sv_done              ; kills <= best -> no new record (unsigned)
+  STW R0, [best]
+  MOV R1, #SVMAGIC
+  STW R1, [SV_MAG]
+  STW R0, [SV_BEST]
+  MOV R1, #1
+  STB R1, [SAVECOMMIT]     ; record complete -> host persists save RAM
+sv_done:
+  RET
+
+; ---- drawnum3(R0=value 0..999, R4=col, R5=row): three white digits on BG0.
+;      Uses DIVU (dividend R1:R0 -> quotient R0, remainder R1); settile keeps R4/R5. ----
+drawnum3:
+  MOV R1, #0               ; high word of the dividend
+  MOV R2, #100
+  DIVU R0, R2              ; R0 = hundreds, R1 = value % 100
+  STW R1, [svrem]
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile            ; hundreds at (col, row)
+  LDW R0, [svrem]
+  MOV R1, #0
+  MOV R2, #10
+  DIVU R0, R2             ; R0 = tens, R1 = ones
+  STW R1, [svrem]
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  ADD R0, #1
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile           ; tens at (col+1, row)
+  LDW R0, [svrem]
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  ADD R0, #2
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile           ; ones at (col+2, row)
+  RET
+
 drawtitle:
   CALL menureset
   MOV R0, #0
@@ -1353,6 +1431,14 @@ drawtitle:
   MOV R4, #15
   MOV R5, #19
   CALL print
+  LDA A1, #sBEST           ; per-browser high score, restored from save RAM
+  MOV R4, #16
+  MOV R5, #24
+  CALL print
+  LDW R0, [best]
+  MOV R4, #21
+  MOV R5, #24
+  CALL drawnum3
   CALL titlesprites        ; hero vs. thugs + boss lineup
   RET
 
@@ -1499,6 +1585,14 @@ drawover:
   MOV R4, #15
   MOV R5, #19
   CALL print
+  LDA A1, #sBEST           ; show the (possibly just-updated) best-kills record
+  MOV R4, #16
+  MOV R5, #24
+  CALL print
+  LDW R0, [best]
+  MOV R4, #21
+  MOV R5, #24
+  CALL drawnum3
   CALL oversprites
   RET
 
@@ -2140,6 +2234,8 @@ sWIN:
   DB Y, O, U, SPC, W, I, N, END
 sOVER:
   DB G, A, M, E, SPC, O, V, E, R, END
+sBEST:
+  DB B, E, S, T, SPC, END
 
 sheet:
   INCBIN "assets.bin"

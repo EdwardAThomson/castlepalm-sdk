@@ -39,9 +39,33 @@ const ctx = cv.getContext('2d', { alpha: false })
 const image = ctx.createImageData(W, H)
 const out = new Uint32Array(image.data.buffer)
 const sel = document.getElementById('cart'), now = document.getElementById('now')
-let sys = null, input = 0
+let sys = null, input = 0, cartBytes = null
 
-function boot(bytes) { sys = new CastlePalm.System(bytes) }
+// --- cartridge save persistence (reference: per-browser, per-profile) --------
+// A cart that uses save RAM writes a record and pokes SAVE_COMMIT; the host moves
+// that 32 KB blob to/from localStorage, keyed by a profileId + the cart title. Only
+// carts whose header declares save RAM (parseCart().hasSave) are persisted.
+function profileId() {
+  let id = localStorage.getItem('cp:profile')
+  if (!id) { id = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2); localStorage.setItem('cp:profile', id) }
+  return id
+}
+function saveKey(bytes) {
+  const info = CastlePalm.parseCart(bytes)
+  return (info && info.hasSave) ? `cp:${profileId()}:${info.title}` : null
+}
+function loadSaveInto(system, bytes) {
+  const key = saveKey(bytes); if (!key) return
+  const b64 = localStorage.getItem(key); if (!b64) return
+  try { const bin = atob(b64), a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); system.importSave(a) } catch (e) {}
+}
+function persistSave(system, bytes) {
+  const key = saveKey(bytes); if (!key) return
+  const a = system.exportSave(); let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i])
+  try { localStorage.setItem(key, btoa(s)) } catch (e) {}
+}
+
+function boot(bytes) { cartBytes = bytes; sys = new CastlePalm.System(bytes); loadSaveInto(sys, bytes) }
 function pick(name) { if (window.CastlePalm && CastlePalm.carts[name]) { boot(CastlePalm.carts[name]); sel.value = name; now.textContent = '' } }
 sel.onchange = () => pick(sel.value)
 document.getElementById('file').onchange = e => {
@@ -68,7 +92,7 @@ function frame(t) {
   acc += t - last; last = t
   if (acc > 250) acc = 250
   let drew = false
-  while (acc >= 16.6667) { acc -= 16.6667; sys.setInput(input); out.set(sys.runFrame()); drew = true }
+  while (acc >= 16.6667) { acc -= 16.6667; sys.setInput(input); out.set(sys.runFrame()); if (sys.consumeSaveDirty()) persistSave(sys, cartBytes); drew = true }
   if (drew) ctx.putImageData(image, 0, 0)
 }
 requestAnimationFrame(frame)

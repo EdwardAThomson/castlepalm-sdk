@@ -20,6 +20,7 @@ const REG = {
   IRQ_FLAGS: 0x100010,    // read: bit0 vblank, bit1 hblank; write-one-to-clear
   IRQ_ENABLE: 0x100012,   // bit0 vblank, bit1 hblank
   FRAME: 0x100014,        // u16 frame counter (read)
+  SAVE_COMMIT: 0x100016,  // u8 write: nonzero latches "save RAM holds a coherent record; persist it"
   DMA_SRC: 0x100020,      // 3 bytes: 24-bit source in CPU space
   DMA_DST: 0x100024,      // u16 destination offset within the dest space
   DMA_LEN: 0x100028,      // u16 byte length
@@ -55,11 +56,23 @@ class System {
     this.apu = new CastlePalmAPU()
     this.audioRate = AUDIO_RATE
     this.audio = null
+    this.saveDirty = false     // set when the cart pokes SAVE_COMMIT; host reads it to persist
     const mmio = { read: a => this.read(a), write: (a, b) => this.write(a, b) }
     const r = boot(cartBytes, { mmio })
     this.cpu = r.cpu; this.cart = r.cart
     this.framebuffer = null
   }
+
+  // ---- cartridge save RAM ($200000-$207FFF) --------------------------------
+  // The guest game owns the bytes; the host owns where they persist. It writes a
+  // coherent record into save RAM then pokes SAVE_COMMIT; the host drains the
+  // dirty flag after a frame and stores exportSave() wherever it likes.
+  exportSave() { return this.cpu.save.slice() }
+  importSave(bytes) {
+    const src = bytes instanceof Uint8Array ? bytes : Uint8Array.from(bytes || [])
+    const s = this.cpu.save; s.fill(0); s.set(src.subarray(0, s.length))
+  }
+  consumeSaveDirty() { const d = this.saveDirty; this.saveDirty = false; return d }
 
   read(a) {
     switch (a) {
@@ -80,6 +93,7 @@ class System {
 
   write(a, b) {
     switch (a) {
+      case REG.SAVE_COMMIT: if (b) this.saveDirty = true; return
       case REG.VRAM_ADDR: this.va = (this.va & 0x1ff00) | b; return
       case REG.VRAM_ADDR + 1: this.va = (this.va & 0x100ff) | (b << 8); return
       case REG.VRAM_ADDR + 2: this.va = (this.va & 0x0ffff) | ((b & 1) << 16); return
