@@ -32,9 +32,15 @@ near_skip:
   ...
 ```
 
-## 4. There is no multiply or divide
-The CPU has no `MUL`/`DIV`. Build them from shifts and adds, and design your data
-around powers of two. A 16-wide grid makes the index a shift, not a multiply:
+## 4. Multiply/divide use a register pair
+The CPU has `MULU`/`MULS` and `DIVU`/`DIVS`, but 16-bit registers can't hold a 32-bit
+result, so they use an implicit pair: `MUL Rd, Rs` writes the low word to `Rd` and the
+high word to `R(d+1 mod 8)`. `DIV Rd, Rs` reads a 32-bit dividend from `R(d+1):Rd` and
+writes quotient→`Rd`, remainder→`R(d+1)`. So `MUL R0,Rs` clobbers `R1`, and you must
+set up `R(d+1)` (often to 0) before a `DIV`. Divide-by-zero sets `V` and does not trap.
+
+For a power-of-two factor a shift is still smaller and faster than a full `MUL` — a
+16-wide grid makes the index a shift, not a multiply:
 
 ```
 ; cell index = cy*16 + cx   -> (cy << 4) + cx

@@ -97,6 +97,7 @@ function classify(mnem, ops) {
       : mk(`${mnem}.r`, () => [packRegs(d, reg(ops[1]))])
   }
   if (mnem === 'ADC' || mnem === 'SBC' || mnem === 'BIT') return mk(`${mnem}.r`, () => [packRegs(reg(ops[0]), reg(ops[1]))])
+  if (mnem === 'MULU' || mnem === 'MULS' || mnem === 'DIVU' || mnem === 'DIVS') return mk(mnem, () => [packRegs(reg(ops[0]), reg(ops[1]))])
   if (mnem === 'NEG' || mnem === 'NOT' || mnem === 'TST') return mk(mnem, () => [packRegs(reg(ops[0]), 0)])
   if (['SHL', 'SHR', 'SAR'].includes(mnem)) {
     const d = reg(ops[0])

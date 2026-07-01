@@ -133,6 +133,7 @@ class CastlePalmCPU {
     const readAddr24 = () => { const t = this.read24(p); p = m24(p + 3); return t }
 
     let next                       // set only by control flow; otherwise = address after operands
+    let cost = 1                    // cycle cost returned to run() (1 default; MUL/DIV are heavier)
     switch (op) {
       case 0x00: break                                                            // NOP
       case 0x01: { readRegs(); const i = readImm16(); R[x] = m16(i); break }       // MOV.i
@@ -158,6 +159,30 @@ class CastlePalmCPU {
       case 0x1d: { readRegs(); const d = readImm8(); this.write8(m24(A[y] + s8(d)), R[x]); break }  // STB.dsp
       case 0x1e: { readRegs(); const m = (this.read8(p) >> 4) & 0xf; p = m24(p + 1); this.write8(m24(A[y] + s16(R[m])), R[x]); break } // STB.idx
       case 0x1f: { readRegs(); const a = readAddr24(); this.write8(a, R[x]); break }                // STB.abs
+
+      // multiply / divide. Operands read before any write (Rs may alias R(d+1)).
+      // MUL: 16x16 -> 32-bit; low word -> Rd, high word -> R(d+1 mod 8). N/Z reflect
+      // the full 32-bit result; V,C cleared. DIV: dividend R(d+1):Rd / Rs -> quotient
+      // -> Rd, remainder -> R(d+1); V set on divide-by-zero or quotient overflow
+      // (result 0 on div-by-zero); N/Z reflect the 16-bit quotient; C cleared.
+      case 0x20: { readRegs(); const hx = (x + 1) & 7, a = R[x], b = R[y]; const P = (a * b) >>> 0    // MULU
+                   R[x] = P & 0xffff; R[hx] = (P >>> 16) & 0xffff
+                   F.z = P === 0; F.n = (P & 0x80000000) !== 0; F.v = false; F.c = false; cost = 8; break }
+      case 0x21: { readRegs(); const hx = (x + 1) & 7, a = s16(R[x]), b = s16(R[y]); const P = a * b   // MULS
+                   R[x] = P & 0xffff; R[hx] = (P >> 16) & 0xffff
+                   F.z = P === 0; F.n = P < 0; F.v = false; F.c = false; cost = 8; break }
+      case 0x22: { readRegs(); const hx = (x + 1) & 7, lo = R[x], hi = R[hx], dv = R[y]                // DIVU
+                   const D = (hi * 65536 + lo) >>> 0
+                   if (dv === 0) { R[x] = 0; R[hx] = 0; F.z = true; F.n = false; F.v = true; F.c = false }
+                   else { const Q = Math.floor(D / dv), Rem = D % dv; F.v = Q > 0xffff
+                          R[x] = Q & 0xffff; R[hx] = Rem & 0xffff; F.z = (Q & 0xffff) === 0; F.n = (Q & 0x8000) !== 0; F.c = false }
+                   cost = 16; break }
+      case 0x23: { readRegs(); const hx = (x + 1) & 7, lo = R[x], hi = s16(R[hx]), dv = s16(R[y])      // DIVS
+                   const D = hi * 65536 + lo
+                   if (dv === 0) { R[x] = 0; R[hx] = 0; F.z = true; F.n = false; F.v = true; F.c = false }
+                   else { const Q = Math.trunc(D / dv), Rem = D - Q * dv; F.v = (Q > 32767 || Q < -32768)
+                          R[x] = Q & 0xffff; R[hx] = Rem & 0xffff; F.z = (Q & 0xffff) === 0; F.n = (Q & 0x8000) !== 0; F.c = false }
+                   cost = 16; break }
 
       case 0x30: { readRegs(); R[x] = this.add16(R[x], R[y]); break }                  // ADD.r
       case 0x31: { readRegs(); const i = readImm16(); R[x] = this.add16(R[x], m16(i)); break } // ADD.i
@@ -228,10 +253,12 @@ class CastlePalmCPU {
 
     this.PC = (next === undefined) ? m24(p) : next
     this.steps++
-    return 1
+    return cost
   }
 
-  run(maxSteps = 1e7) { let n = 0; while (n < maxSteps && !this.halted && !this.waiting) { this.step(); n++ } return n }
+  // `maxSteps` is now a CYCLE budget (most instructions cost 1; MUL/DIV cost more).
+  // Existing carts are unaffected: they all cost 1 and stop at WAIT/HALT well inside it.
+  run(maxSteps = 1e7) { let n = 0; while (n < maxSteps && !this.halted && !this.waiting) { n += this.step() } return n }
 }
 
 module.exports = { CastlePalmCPU, VECTOR_BASE }

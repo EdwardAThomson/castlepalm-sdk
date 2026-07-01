@@ -40,6 +40,14 @@ const TABLE = [
   ['STB.idx', 0x1e, ['regs', 'regs']],
   ['STB.abs', 0x1f, ['regs', 'addr24']],
 
+  // --- multiply / divide (Rd,Rs). MUL: 16x16 -> 32-bit, low word -> Rd, high word
+  //     -> R(d+1 mod 8). DIV: 32-bit dividend R(d+1):Rd / Rs -> quotient -> Rd,
+  //     remainder -> R(d+1). See cpu/core.js for flags + div-by-zero behaviour. ---
+  ['MULU', 0x20, ['regs']],
+  ['MULS', 0x21, ['regs']],
+  ['DIVU', 0x22, ['regs']],
+  ['DIVS', 0x23, ['regs']],
+
   // --- arithmetic (16-bit) ---
   ['ADD.r', 0x30, ['regs']],
   ['ADD.i', 0x31, ['regs', 'imm16']],

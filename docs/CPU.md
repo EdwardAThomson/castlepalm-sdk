@@ -39,7 +39,10 @@ Load a full 24-bit address into an address register with `LDA An, #addr`
 
 **Arithmetic (16-bit, on `Rn`)**
 `ADD` · `SUB` · `ADC` · `SBC` (multi-word carry) · `CMP` · `NEG`
-&nbsp;&nbsp;*(no `MUL`/`DIV` — build them from shifts and adds)*
+`MULU`/`MULS` · `DIVU`/`DIVS`
+&nbsp;&nbsp;*(`MUL` is 16×16→32: low word → `Rd`, high word → `R(d+1 mod 8)`. `DIV` is
+32/16→16: dividend `R(d+1):Rd` → quotient `Rd`, remainder `R(d+1)`; divide-by-zero
+sets `V` with no trap. MUL costs 8 cycles, DIV 16.)*
 
 **Address registers (24-bit)**
 `INC`/`DEC` (a.k.a. `INCA`/`DECA`) · `ADD An,Rm` · `CMPA` · `LDA`
