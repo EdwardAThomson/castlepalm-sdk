@@ -4,10 +4,15 @@
 ;   Walk your hero along a scrolling sidewalk (8-way, D-pad), throw punches (A),
 ;   and clear the street of thugs. Enemies chase you, stagger and flash white when
 ;   hit, and get knocked back; touch one and you lose a chunk of the health bar.
-;   Clear a wave of thugs and the street scrolls on; clear two waves and a boss to
-;   finish a stage, then an interstitial leads into the next of three stages. Clear
-;   the last boss to WIN, or run out of health for GAME OVER. Grab a lead pipe to
-;   hit harder and farther (limited swings), and a drumstick to restore health.
+;   Three thug types mix in per wave (grunt / fast runner / tanky bruiser), driven
+;   by the TYPE* stat tables + the wavedef spawn table. Clear a wave and the street
+;   scrolls on; clear three waves and a boss to finish a stage, then an interstitial
+;   leads into the next of three stages. Clear the last boss to WIN, or run out of
+;   health for GAME OVER. Grab a lead pipe to hit harder and farther (limited
+;   swings), and a drumstick to restore health.
+;
+;   Hits land with a brief hit-stop freeze and a camera shake for punch; a one-channel
+;   chiptune riff loops on square-1 (SFX stay on square-0).
 ;
 ;   Controls:  D-pad = move    A = punch / swing    Start = begin / restart
 ;
@@ -32,6 +37,9 @@ PPU_CTRL   EQU $101018
 SQ0_PERIOD EQU $102000
 SQ0_VOL    EQU $102002
 SQ0_CTRL   EQU $102003
+SQ1_PERIOD EQU $102004    ; square 1 — reserved for the music loop (SFX use SQ0)
+SQ1_VOL    EQU $102006
+SQ1_CTRL   EQU $102007
 
 ; ---- input bits ----
 UP    EQU 1
@@ -64,7 +72,7 @@ FONT     EQU 64
 DIGIT    EQU 96         ; DIGIT + (0..9)
 
 ; ---- tuning ----
-NENEM    EQU 6
+NENEM    EQU 8          ; enemy pool (on-screen slots); waves can fill up to this many
 ENHP     EQU 3
 SPEED    EQU 2          ; player px / frame
 ESPD     EQU 1          ; enemy px / frame (slower, so you can juke them)
@@ -92,13 +100,27 @@ EXMAX    EQU 1500       ; enemy world-x clamp (knockback)
 WAVEN    EQU 3          ; thugs on screen per normal wave (must be <= NENEM)
 SEG      EQU 200        ; camera advance per wave (world px)
 NLEVELS  EQU 3          ; number of stages
-NORMW    EQU 2          ; normal waves per level before the boss (boss = wave NORMW)
+NORMW    EQU 3          ; normal waves per level before the boss (boss = wave NORMW)
 BOSSHP   EQU 18         ; boss hit points
 BOSSBAR  EQU 18         ; boss HP-bar cells (== BOSSHP, so no scaling math)
 INTERT   EQU 150        ; interstitial duration (frames)
 CLRPAUSE EQU 110        ; quiet beat after a boss falls, before the next screen
 EHOLD0   EQU 80         ; freeze the first wave this long so it doesn't rush you
 EHOLD    EQU 30         ; brief freeze on later wave spawns
+; ---- enemy types: index into the TYPE* tables in the data section ----
+NTYPES   EQU 3          ; 0 grunt, 1 runner, 2 bruiser
+GRUNT    EQU 0
+RUNNER   EQU 1
+BRUISER  EQU 2
+NONE     EQU $FF        ; empty slot in a wave descriptor
+; ---- combat juice ----
+SHAKEP   EQU 10         ; screen-shake frames when the player is hit
+SHAKEW   EQU 6          ; screen-shake frames on a kill
+SHAKEAMP EQU 3          ; shake amplitude (px)
+HITSTOP  EQU 3          ; freeze frames on a pipe hit
+HSKILL   EQU 4          ; freeze frames on a kill
+; ---- music ----
+NOTELEN  EQU 9          ; frames each note is held (tempo)
 
 ; ---- RAM ----
 state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over
@@ -125,12 +147,19 @@ bossmaxhp EQU $000150   ; boss starting HP (for the bar)
 interT   EQU $000152    ; interstitial countdown (state 4)
 ehold    EQU $000154    ; frames the freshly-spawned wave stays frozen
 clrpause EQU $000156    ; quiet beat after a boss dies, before the next screen
+gtick    EQU $000158    ; free-running play-frame counter (drives half-speed bruisers)
+shakeT   EQU $00015A    ; screen-shake countdown
+hitstop  EQU $00015C    ; hit-freeze countdown (whole game pauses)
+mIdx     EQU $00015E    ; music: current note index
+mT       EQU $000160    ; music: frames left on the current note
+eidx     EQU $000162    ; index of the enemy currently being processed (type lookups)
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
 hbx1     EQU $000132
 hby0     EQU $000134
 hby1     EQU $000136
-ENEMY    EQU $000200    ; NENEM slots x 8 bytes
+ENEMY    EQU $000200    ; NENEM slots x 8 bytes  ($0200..$023F for 8 slots)
 ;   +0 alive  +1 hp  +2 hurt(stagger)  +3 faceRight  +4 px(u16)  +6 py(u16)
+ETYPE    EQU $000248    ; parallel array: 1 type byte per enemy slot (keeps the 8-byte stride)
 NPICK    EQU 4          ; max pickups live at once
 PICKUP   EQU $000260    ; NPICK slots x 8 bytes
 ;   +0 type (0 none, 1 pipe, 2 food)  +2 px(u16)  +4 py(u16)
@@ -181,6 +210,11 @@ start:
   STW R0, [in_now]
   STW R0, [in_prev]
   STW R0, [sfxT]
+  STW R0, [gtick]
+  STW R0, [shakeT]
+  STW R0, [hitstop]
+  STW R0, [mIdx]           ; start the music loop from the top
+  STW R0, [mT]
   CALL drawtitle
   MOV R0, #0
   STW R0, [state]
@@ -201,6 +235,7 @@ ml_inter:
   CALL interframe
 ml_wait:
   CALL sfxtick
+  CALL musictick
   WAIT
   BRA mainloop
 
@@ -235,6 +270,16 @@ mf_done:
 
 ; ============================ one play frame ============================
 playframe:
+  LDW R0, [hitstop]        ; hit-freeze: hold the whole scene for a few frames
+  CMP R0, #0
+  BEQ pf_run
+  SUB R0, #1
+  STW R0, [hitstop]
+  RET                      ; OAM persists, so the screen stays frozen on impact
+pf_run:
+  LDW R0, [gtick]          ; free-running tick (half-speed bruisers key off it)
+  ADD R0, #1
+  STW R0, [gtick]
   CALL domove
   CALL punchupdate
   CALL doenemies
@@ -502,6 +547,12 @@ eh_set:
   STB R0, [A1+#1]
   MOV R1, #HITSTUN
   STB R1, [A1+#2]
+  LDW R1, [p_wswing]     ; pipe hits land with a brief freeze; fists don't
+  CMP R1, #0
+  BEQ eh_snd
+  MOV R1, #HITSTOP
+  STW R1, [hitstop]
+eh_snd:
   PUSH R0
   MOV R0, #120
   CALL sfxblip
@@ -513,6 +564,10 @@ eh_set:
   LDW R1, [kills]
   ADD R1, #1
   STW R1, [kills]
+  MOV R1, #HSKILL        ; a kill freezes a touch longer and kicks the camera
+  STW R1, [hitstop]
+  MOV R1, #SHAKEW
+  STW R1, [shakeT]
   MOV R0, #90
   CALL sfxblip
 eh_done:
@@ -532,6 +587,7 @@ de_lp:
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
+  STW R7, [eidx]           ; eai/curspd/curdmg look up ETYPE[eidx]
   PUSH R7
   CALL eai
   POP R7
@@ -579,16 +635,18 @@ ea_kbs:
 ea_chase:
   LDW R4, [A1+#4]         ; ex
   LDW R5, [A1+#6]         ; ey
+  CALL curspd            ; R0 = this enemy's speed (0 on a bruiser's rest frame)
+  MOV R3, R0             ; hold speed in R3 across the move
   LDW R6, [p_x]
   CMP R4, R6
   BEQ ea_cy
   BLT ea_cxr
-  SUB R4, #ESPD
+  SUB R4, R3
   MOV R0, #0
   STB R0, [A1+#3]         ; faces left
   BRA ea_cy
 ea_cxr:
-  ADD R4, #ESPD
+  ADD R4, R3
   MOV R0, #1
   STB R0, [A1+#3]         ; faces right
 ea_cy:
@@ -596,10 +654,10 @@ ea_cy:
   CMP R5, R6
   BEQ ea_cstore
   BLT ea_cyd
-  SUB R5, #ESPD
+  SUB R5, R3
   BRA ea_cstore
 ea_cyd:
-  ADD R5, #ESPD
+  ADD R5, R3
 ea_cstore:
   STW R4, [A1+#4]
   STW R5, [A1+#6]
@@ -619,20 +677,28 @@ ea_cstore:
   LDW R0, [p_hurt]        ; only if not in i-frames
   CMP R0, #0
   BNE ea_done
-  CALL hurtplayer        ; R4 = enemy x (knock direction)
+  CALL curdmg            ; R0 = this enemy type's contact damage
+  MOV R2, R0
+  CALL hurtplayer        ; R4 = enemy x (knock direction), R2 = damage
 ea_done:
   RET
 
-; ---- hurtplayer(R4=enemy x): -1 health, i-frames, shove player away ----
+; ---- hurtplayer(R4=enemy x, R2=damage): lose health, i-frames, shake, shove away ----
 hurtplayer:
   LDW R0, [p_hp]
   CMP R0, #0
   BEQ hu_if
-  SUB R0, #1
+  SUB R0, R2
+  CMP R0, #0             ; clamp at 0 (a bruiser can deal 2)
+  BGE hu_hp
+  MOV R0, #0
+hu_hp:
   STW R0, [p_hp]
 hu_if:
   MOV R0, #INVULN
   STW R0, [p_hurt]
+  MOV R0, #SHAKEP        ; jolt the screen
+  STW R0, [shakeT]
   LDW R0, [p_x]
   CMP R0, R4
   BLT hu_left
@@ -654,6 +720,39 @@ absr0:
   BGE abr_d
   NEG R0
 abr_d:
+  RET
+
+; ---- curtype -> R0 = ETYPE[eidx]. Scratches A0; preserves R1-R7, A1. ----
+curtype:
+  LDW R0, [eidx]
+  LDA A0, #ETYPE
+  ADD A0, R0
+  LDB R0, [A0]
+  RET
+
+; ---- curspd -> R0 = movement speed for the current enemy. Bruisers move every
+;      other frame (half speed), keyed off gtick. Scratches R1,R2,A0. ----
+curspd:
+  CALL curtype
+  MOV R1, R0             ; keep type
+  LDA A0, #TYPESPD
+  ADD A0, R0
+  LDB R0, [A0]           ; base speed
+  CMP R1, #BRUISER
+  BNE cspd_d
+  LDW R2, [gtick]
+  AND R2, #1
+  BEQ cspd_d
+  MOV R0, #0            ; bruiser rests this frame
+cspd_d:
+  RET
+
+; ---- curdmg -> R0 = contact damage for the current enemy. Scratches A0. ----
+curdmg:
+  CALL curtype
+  LDA A0, #TYPEDMG
+  ADD A0, R0
+  LDB R0, [A0]
   RET
 
 ; ---- clampxp: R0 = clamp(R0, XMIN, cammax+PXMAX); scratches R2 ----
@@ -683,6 +782,23 @@ uc_lo:
   BLE uc_set
   MOV R0, R1
 uc_set:
+  LDW R1, [shakeT]         ; add a decaying horizontal jitter while shaking
+  CMP R1, #0
+  BEQ uc_write
+  SUB R1, #1
+  STW R1, [shakeT]
+  MOV R2, R1
+  AND R2, #1
+  BEQ uc_sneg
+  ADD R0, #SHAKEAMP
+  BRA uc_clamp
+uc_sneg:
+  SUB R0, #SHAKEAMP
+uc_clamp:
+  CMP R0, #0              ; cam is treated as unsigned by the sprite math -> keep >= 0
+  BGE uc_write
+  MOV R0, #0
+uc_write:
   STW R0, [cam]
   STW R0, [BG0_SX]        ; scroll BG0 to match (street wraps, so it stays seamless)
   RET
@@ -699,6 +815,7 @@ bo_e:
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
+  STW R7, [eidx]           ; emitenemy reads ETYPE[eidx] to pick a palette
   CALL emitenemy
   ADD R7, #1
   CMP R7, #NENEM
@@ -781,7 +898,14 @@ ee_on:
   BEQ ee_tile
   MOV R5, #EN_WALKB
 ee_tile:
-  MOV R6, #$12           ; size16 | palette bank 2
+  PUSH R0                ; save screen x across the type lookup
+  CALL curtype          ; R0 = enemy type
+  LDA A0, #TYPEBANK
+  ADD A0, R0
+  LDB R0, [A0]          ; palette bank for this type
+  MOV R6, #$10          ; size16
+  OR R6, R0             ; | palette bank  (grunt=2, runner=7, bruiser=8)
+  POP R0                ; restore screen x
   LDB R2, [A1+#2]        ; staggered -> flash palette bank 4
   CMP R2, #0
   BEQ ee_face
@@ -1449,6 +1573,8 @@ loadlevel:
   STW R0, [wave]
   STW R0, [bossactive]
   STW R0, [clrpause]
+  STW R0, [shakeT]         ; clear any leftover juice timers
+  STW R0, [hitstop]
   STW R0, [p_face]
   STW R0, [p_punch]
   STW R0, [p_hurt]
@@ -1628,11 +1754,14 @@ nextwave:
 nw_done:
   RET
 
-; ---- spawnwave: boss wave -> spawnboss; else WAVEN thugs right of the camera limit ----
+; ---- spawnwave: boss wave -> spawnboss; else read the (level,wave) descriptor from
+;      wavedef and spawn one typed thug per non-empty slot, spread across the street ----
 spawnwave:
   LDW R0, [wave]
   CMP R0, #NORMW
-  BGE spawnboss
+  BLT sw_normal
+  BRA spawnboss          ; boss wave (BRA: spawnboss is out of short-branch range)
+sw_normal:
   MOV R0, #EHOLD          ; brief grace before they advance...
   LDW R1, [wave]
   CMP R1, #0
@@ -1642,39 +1771,69 @@ sw_hold:
   STW R0, [ehold]
   MOV R0, #0
   STW R0, [bossactive]
+  ; descriptor base A0 = wavedef + (level*NORMW + wave) * NENEM
+  LDW R0, [level]
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0             ; level * 3   (NORMW = 3)
+  LDW R0, [wave]
+  ADD R1, R0             ; + wave  -> descriptor row index
+  SHL R1, #3             ; * 8 bytes/row  (NENEM = 8 type bytes per row)
+  LDA A0, #wavedef
+  ADD A0, R1
   MOV R7, #0
 sw_lp:
+  LDB R0, [A0+R7]        ; type for slot R7 (NONE = empty)
+  CMP R0, #NONE
+  BEQ sw_dead
+  LDA A2, #ETYPE         ; ETYPE[R7] = type
+  ADD A2, R7
+  STB R0, [A2]
+  LDA A2, #TYPEHP        ; hp = TYPEHP[type]
+  ADD A2, R0
+  LDB R1, [A2]
+  MOV R3, R7             ; slot pointer
+  SHL R3, #3
+  LDA A1, #ENEMY
+  ADD A1, R3
+  MOV R0, #1
+  STB R0, [A1+#0]        ; alive
+  STB R1, [A1+#1]        ; hp
+  MOV R0, #0
+  STB R0, [A1+#2]        ; hurt
+  STB R0, [A1+#3]        ; face
+  LDW R0, [cammax]        ; x = cammax + 160 + i*48 (staggered off the right edge)
+  ADD R0, #160
+  MOV R2, R7
+  SHL R2, #5            ; i*32
+  MOV R3, R7
+  SHL R3, #4           ; i*16
+  ADD R2, R3           ; i*48
+  ADD R0, R2
+  STW R0, [A1+#4]
+  MOV R0, R7            ; y = 96 + (i&3)*24  (four rows down the band)
+  AND R0, #3
+  MOV R2, R0
+  SHL R2, #4           ; row*16
+  SHL R0, #3           ; row*8
+  ADD R2, R0           ; row*24
+  MOV R0, R2
+  ADD R0, #96
+  STW R0, [A1+#6]
+  BRA sw_next
+sw_dead:
   MOV R3, R7
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
-  CMP R7, #WAVEN
-  BGE sw_dead              ; slots past the wave size stay dead
-  MOV R0, #1
-  STB R0, [A1+#0]
-  MOV R0, #ENHP
-  STB R0, [A1+#1]
-  MOV R0, #0
-  STB R0, [A1+#2]
-  STB R0, [A1+#3]
-  LDW R0, [cammax]         ; spawn x = limit + 180 + i*64 (off to the right)
-  ADD R0, #180
-  MOV R2, R7
-  SHL R2, #6
-  ADD R0, R2
-  STW R0, [A1+#4]
-  MOV R0, R7             ; spawn y = 100 + i*32 (spread down the band)
-  SHL R0, #5
-  ADD R0, #100
-  STW R0, [A1+#6]
-  BRA sw_next
-sw_dead:
   MOV R0, #0
   STB R0, [A1+#0]
 sw_next:
   ADD R7, #1
   CMP R7, #NENEM
-  BLT sw_lp
+  BGE sw_ret            ; forward exit + BRA back keeps the loop in short-branch range
+  BRA sw_lp
+sw_ret:
   RET
 
 ; ---- spawnboss: one boss in slot 0, all other slots idle, boss bar armed ----
@@ -1684,6 +1843,9 @@ spawnboss:
   STB R0, [A1+#0]
   MOV R0, #BOSSHP
   STB R0, [A1+#1]
+  LDA A2, #ETYPE          ; boss uses the grunt profile (steady speed, 1 contact dmg)
+  MOV R0, #GRUNT
+  STB R0, [A2]
   MOV R0, #0
   STB R0, [A1+#2]
   STB R0, [A1+#3]
@@ -1733,6 +1895,49 @@ sfxtick:
   MOV R0, #0
   STB R0, [SQ0_CTRL]
 sx_done:
+  RET
+
+; ---- musictick: a one-channel (SQ1) looping riff. Each note holds NOTELEN frames;
+;      song[] is a word list of periods (0 = rest, $FFFF = loop to the top). ----
+musictick:
+  LDW R0, [mT]
+  CMP R0, #0
+  BEQ mt_next
+  SUB R0, #1
+  STW R0, [mT]
+  RET
+mt_next:
+  LDW R0, [mIdx]         ; period = song[mIdx]
+  LDA A0, #song
+  MOV R1, R0
+  SHL R1, #1
+  ADD A0, R1
+  LDW R2, [A0]
+  MOV R1, #$FFFF        ; end marker -> loop back to note 0
+  CMP R2, R1
+  BNE mt_play
+  MOV R0, #0
+  STW R0, [mIdx]
+  LDA A0, #song
+  LDW R2, [A0]
+mt_play:
+  CMP R2, #0            ; 0 = rest -> silence the channel
+  BEQ mt_rest
+  STW R2, [SQ1_PERIOD]
+  MOV R0, #5
+  STB R0, [SQ1_VOL]
+  MOV R0, #1
+  STB R0, [SQ1_CTRL]
+  BRA mt_adv
+mt_rest:
+  MOV R0, #0
+  STB R0, [SQ1_CTRL]
+mt_adv:
+  MOV R0, #NOTELEN
+  STW R0, [mT]
+  LDW R0, [mIdx]
+  ADD R0, #1
+  STW R0, [mIdx]
   RET
 
 ; ============================ palettes ============================
@@ -1827,6 +2032,30 @@ setpal:
   STW R0, [PAL_DATA]     ; 3 skin
   MOV R0, #$7FFF
   STW R0, [PAL_DATA]     ; 4 white (eyes / flash)
+  MOV R0, #112           ; bank 7: runner (fast, fragile) — teal jacket
+  STB R0, [PAL_INDEX]
+  MOV R0, #$0000
+  STW R0, [PAL_DATA]
+  MOV R0, #$5F20
+  STW R0, [PAL_DATA]     ; 1 body (bright teal)
+  MOV R0, #$2980
+  STW R0, [PAL_DATA]     ; 2 dark teal
+  MOV R0, #$3A5C
+  STW R0, [PAL_DATA]     ; 3 skin
+  MOV R0, #$7FFF
+  STW R0, [PAL_DATA]     ; 4 white
+  MOV R0, #128           ; bank 8: bruiser (slow, tanky) — heavy brown
+  STB R0, [PAL_INDEX]
+  MOV R0, #$0000
+  STW R0, [PAL_DATA]
+  MOV R0, #$1952
+  STW R0, [PAL_DATA]     ; 1 body (brown)
+  MOV R0, #$0A0C
+  STW R0, [PAL_DATA]     ; 2 dark brown
+  MOV R0, #$3A5C
+  STW R0, [PAL_DATA]     ; 3 skin
+  MOV R0, #$7FFF
+  STW R0, [PAL_DATA]     ; 4 white
   RET
 
 ; ---- copy the whole tile sheet from ROM into VRAM tile region (offset 0) ----
@@ -1851,6 +2080,38 @@ levelpal:
   DW $10D6, $215B, $5294, $109E   ; stage 1: red brick, red thugs
   DW $3042, $40C4, $418C, $609C   ; stage 2: night blue, magenta thugs
   DW $1142, $1A04, $3254, $0A1E   ; stage 3: industrial green, orange thugs
+
+; ---- enemy type stats, indexed by type (GRUNT, RUNNER, BRUISER) ----
+TYPEHP:                          ; hit points
+  DB 3, 2, 6
+TYPESPD:                         ; chase speed (px/frame; bruiser also rests alt frames)
+  DB 1, 2, 1
+TYPEDMG:                         ; contact damage
+  DB 1, 1, 2
+TYPEBANK:                        ; sprite palette bank
+  DB 2, 7, 8
+
+; ---- wave descriptors: NLEVELS*NORMW rows, NENEM type bytes each (NONE = empty).
+;      Row index = level*NORMW + wave. Difficulty ramps across the stages. ----
+wavedef:
+  ; stage 1
+  DB GRUNT,   GRUNT,   NONE,    NONE,    NONE,    NONE,    NONE,    NONE
+  DB GRUNT,   GRUNT,   RUNNER,  NONE,    NONE,    NONE,    NONE,    NONE
+  DB GRUNT,   GRUNT,   GRUNT,   RUNNER,  NONE,    NONE,    NONE,    NONE
+  ; stage 2
+  DB GRUNT,   RUNNER,  RUNNER,  NONE,    NONE,    NONE,    NONE,    NONE
+  DB GRUNT,   GRUNT,   BRUISER, NONE,    NONE,    NONE,    NONE,    NONE
+  DB RUNNER,  RUNNER,  GRUNT,   BRUISER, NONE,    NONE,    NONE,    NONE
+  ; stage 3
+  DB GRUNT,   GRUNT,   BRUISER, BRUISER, NONE,    NONE,    NONE,    NONE
+  DB RUNNER,  RUNNER,  RUNNER,  GRUNT,   NONE,    NONE,    NONE,    NONE
+  DB GRUNT,   RUNNER,  BRUISER, GRUNT,   RUNNER,  BRUISER, NONE,    NONE
+
+; ---- song: SQ1 periods, 0 = rest, $FFFF = loop. A driving minor-key riff. ----
+song:
+  DW 109, 109, 0,   73,  92,  0,   73,  55
+  DW 61,  61,  0,   73,  92,  73,  109, 0
+  DW $FFFF
 
 sTITLE1:
   DB S, T, R, E, E, T, END

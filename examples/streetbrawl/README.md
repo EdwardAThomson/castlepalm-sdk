@@ -11,10 +11,24 @@ your health bar.
 | **A** | punch, or swing your weapon if you're holding one |
 | **Start** | begin / restart |
 
-Each **stage** is two thug waves and then a **boss** (its red health bar shows under
-the stage label). Clearing the boss rolls a **"STAGE n — GET READY"** interstitial
-and scrolls you into the next, freshly recoloured street. Clear the final boss and
-it's **YOU WIN**; let the thugs drain the health bar up top and it's **GAME OVER**.
+Each **stage** is three thug waves and then a **boss** (its red health bar shows
+under the stage label). Clearing the boss rolls a **"STAGE n — GET READY"**
+interstitial and scrolls you into the next, freshly recoloured street. Clear the
+final boss and it's **YOU WIN**; let the thugs drain the health bar up top and it's
+**GAME OVER**.
+
+Three **thug types** come at you, colour-coded and mixed in escalating combinations
+per wave (see the `wavedef` table):
+
+| Type | Look | Behaviour |
+| --- | --- | --- |
+| **Grunt** | stage-coloured (red / magenta / orange) | average speed and toughness |
+| **Runner** | teal | fast but fragile — rushes you, drops in one pipe hit |
+| **Bruiser** | brown | slow (moves every other frame) but tanky and hits for double |
+
+Hits land with a brief **hit-stop** freeze and the camera **shakes** when you take a
+blow or drop an enemy, and a looping chiptune riff plays underneath (square-1; the
+sound effects stay on square-0).
 
 Bare fists take three hits to drop a thug. A **lead pipe** hits harder (one shot),
 reaches farther, and swings faster, but only for a handful of swings — its
@@ -56,6 +70,16 @@ it into Castle Arcade.
   OAM → `WAIT`*, a directional strike hitbox (longer + stronger while armed),
   chasing enemies that stagger/flash and get knocked back when hit, contact damage
   with i-frames, weapon/food pickups, and a BG-tile health + weapon HUD.
+- **Enemy types** are data-driven. A per-type stat table (`TYPEHP`/`TYPESPD`/
+  `TYPEDMG`/`TYPEBANK`) and a per-wave `wavedef` table describe who spawns where, so
+  tuning difficulty or adding a wave is a data edit, not new code. The type lives in
+  a parallel `ETYPE[]` array so the enemy slot keeps its tight 8-byte stride, and
+  each type is a palette swap (no extra tiles) — classic beat-'em-up recolouring.
+- **Feel.** A `hitstop` counter freezes the whole scene for a few frames on impact;
+  a `shakeT` counter adds a decaying horizontal camera jitter (folded into the same
+  `cam` value the sprites and scroll already read). A tiny sequencer (`musictick`)
+  walks a `song[]` period list on square-1 for background music, independent of the
+  square-0 sound effects.
 - **Scrolling & waves.** The 64-tile street map is column-uniform, so writing the
   `BG0_SX` scroll register wraps seamlessly. A camera follows the player up to a
   per-wave limit that grows each time a wave is cleared; sprites are drawn at
