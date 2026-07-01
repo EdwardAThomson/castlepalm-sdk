@@ -12,6 +12,11 @@ PAL_DATA  EQU $10100A
 OAM_INDEX EQU $10100C
 OAM_DATA  EQU $10100E
 PPU_CTRL  EQU $101018
+SAVECOMMIT EQU $100016   ; poke nonzero after writing a save record; host persists save RAM
+; --- save RAM (battery; survives reload), per docs/MEMORY_MAP.md $200000 ---
+SAVELO     EQU $200000   ; u16 high score
+SAVEMAG    EQU $200002   ; u16 magic marking an initialised save
+SAVE_MAGIC EQU $534E     ; 'NS' marker
 
 ; --- input bits ---
 UP    EQU 1
@@ -52,8 +57,10 @@ rng     EQU $000112
 slen    EQU $000114
 hptr    EQU $000116
 tptr    EQU $000118
-state   EQU $00011A     ; 0 title, 1 play, 2 over
+state   EQU $00011A     ; 0 title, 1 play, 2 over, 3 paused
 sfxT    EQU $00011C     ; sound-effect countdown
+prevS   EQU $00011E     ; Start button state last frame (for edge detect)
+hiscore EQU $000120     ; u16 high score (mirrors save RAM)
 RING    EQU $001000     ; 2048 x 2-byte packed (y<<8|x)
 OCC     EQU $002000     ; 1 byte per cell (y*40+x)
 
@@ -182,12 +189,19 @@ st_cpw:
   MOV R0, #0
   STW R0, [state]
   STW R0, [sfxT]
+  CALL loadhiscore
   CALL drawtitle
 
 mainloop:
   LDW R0, [state]
   CMP R0, #1
-  BEQ playing
+  BNE ml_chk3
+  BRA playing          ; trampoline (Bcc range is +/-127)
+ml_chk3:
+  CMP R0, #3
+  BNE ml_title
+  BRA paused           ; trampoline
+ml_title:
   ; title / game over: wait for Start to (re)start
   LDW R0, [INPUT]
   AND R0, #START
@@ -198,7 +212,33 @@ ml_wait:
   WAIT
   BRA mainloop
 
+; ---- paused: freeze all game-state updates; Start edge resumes ----
+paused:
+  LDW R0, [INPUT]
+  AND R0, #START
+  LDW R1, [prevS]
+  STW R0, [prevS]
+  CMP R0, #0
+  BEQ pa_done          ; Start not held
+  CMP R1, #0
+  BNE pa_done          ; held last frame too -> not an edge
+  CALL resumepause
+pa_done:
+  BRA ml_wait
+
 playing:
+  ; Start rising edge toggles pause
+  LDW R0, [INPUT]
+  AND R0, #START
+  LDW R1, [prevS]
+  STW R0, [prevS]
+  CMP R0, #0
+  BEQ pl_run           ; Start not held
+  CMP R1, #0
+  BNE pl_run           ; held last frame too -> not an edge
+  CALL enterpause
+  BRA ml_wait
+pl_run:
   CALL readinput
   LDW R0, [mtimer]
   ADD R0, #1
@@ -213,7 +253,9 @@ playing:
   BEQ pl_draw
   MOV R0, #2
   STW R0, [state]
+  CALL savehiscore
   CALL drawgameover
+  CALL drawhiover
 pl_draw:
   CALL drawscore
   BRA ml_wait
@@ -474,6 +516,79 @@ pf_retry:
   RET
 
 ; ---- draw the 2-digit score as sprites ----
+; ---- loadhiscore: restore the high score from save RAM (0 if none yet) ----
+loadhiscore:
+  LDW R0, [SAVEMAG]
+  CMP R0, #SAVE_MAGIC
+  BNE lhs_zero
+  LDW R0, [SAVELO]
+  STW R0, [hiscore]
+  RET
+lhs_zero:
+  MOV R0, #0
+  STW R0, [hiscore]
+  RET
+
+; ---- savehiscore: if this run beat the record, store it and poke SAVE_COMMIT ----
+savehiscore:
+  LDW R0, [score]
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BLS shs_no             ; score <= hiscore (unsigned) -> no new record
+  STW R0, [hiscore]
+  STW R0, [SAVELO]
+  MOV R0, #SAVE_MAGIC
+  STW R0, [SAVEMAG]
+  MOV R0, #1
+  STB R0, [SAVECOMMIT]   ; record complete -> host persists save RAM
+shs_no:
+  RET
+
+; ---- clearhi: blank the two high-score sprites (OAM slots 2,3) ----
+clearhi:
+  MOV R0, #16            ; byte offset of sprite slot 2
+  STW R0, [OAM_INDEX]
+  MOV R1, #16            ; 2 sprites x 8 bytes
+  MOV R0, #0
+chi_lp:
+  STB R0, [OAM_DATA]
+  SUB R1, #1
+  CMP R1, #0
+  BGT chi_lp
+  RET
+
+; ---- drawhiover: "HI" label + the 2-digit high score on the game-over screen.
+;      Uses OAM slots 2,3 so it coexists with the final score (slots 0,1). ----
+drawhiover:
+  MOV R4, #16
+  MOV R5, #18
+  LDA A1, #str_hi
+  CALL print16
+  MOV R0, #16            ; high-score digits -> OAM slots 2,3
+  STW R0, [OAM_INDEX]
+  LDW R5, [hiscore]
+  MOV R4, #0
+dho_div:
+  CMP R5, #10
+  BLT dho_done
+  SUB R5, #10
+  ADD R4, #1
+  BRA dho_div
+dho_done:
+  MOV R6, R4
+  SHL R6, #2
+  ADD R6, #BIGDIG        ; tens digit sprite
+  MOV R0, #168
+  MOV R1, #148
+  CALL emitdigit
+  MOV R6, R5
+  SHL R6, #2
+  ADD R6, #BIGDIG        ; ones digit sprite
+  MOV R0, #186
+  MOV R1, #148
+  CALL emitdigit
+  RET
+
 drawscore:
   MOV R0, #0
   STW R0, [OAM_INDEX]
@@ -552,6 +667,7 @@ cb_x:
 resetgame:
   CALL clearboard
   CALL drawhud
+  CALL clearhi
   MOV R0, #0
   STW R0, [score]
   STW R0, [gover]
@@ -561,6 +677,8 @@ resetgame:
   STW R0, [slen]
   MOV R0, #1
   STW R0, [state]
+  MOV R0, #START         ; Start is held now; mark it so it is not a pause edge
+  STW R0, [prevS]
   MOV R0, #3
   STW R0, [dir]
   STW R0, [nextDir]
@@ -640,13 +758,10 @@ drawtitle:
   MOV R5, #6
   LDA A1, #str_snake
   CALL print16
-  MOV R4, #10
-  MOV R5, #11
-  LDA A1, #str_push
-  CALL print16
-  MOV R4, #9
-  MOV R5, #15
-  LDA A1, #str_move
+  ; controls legend (BUTTON-labelled, per CastlePalm controls standard)
+  MOV R4, #3
+  MOV R5, #12
+  LDA A1, #str_legend
   CALL print16
   ; little snake + food graphic (green body tiles + a red pellet)
   LDA A1, #snakeart
@@ -682,6 +797,91 @@ drawgameover:
   MOV R5, #14
   LDA A1, #str_push
   CALL print16
+  RET
+
+; ---- enter pause: freeze, dim the screen, draw the overlay ----
+enterpause:
+  MOV R0, #3
+  STW R0, [state]
+  CALL dimpal
+  MOV R4, #14            ; PAUSED, centered
+  MOV R5, #11
+  LDA A1, #str_paused
+  CALL print16
+  MOV R4, #3             ; same legend as the title
+  MOV R5, #15
+  LDA A1, #str_legend
+  CALL print16
+  MOV R0, #120           ; soft pause chirp
+  MOV R1, #3
+  CALL sfx
+  RET
+
+; ---- resume: restore palette, redraw the board, return to play ----
+resumepause:
+  CALL litpal
+  CALL redrawboard
+  MOV R0, #1
+  STW R0, [state]
+  MOV R0, #90            ; resume chirp
+  MOV R1, #3
+  CALL sfx
+  RET
+
+; ---- redraw the playfield from the occupancy grid (clears the overlay) ----
+redrawboard:
+  CALL drawhud
+  MOV R5, #PLAYTOP
+rb_y:
+  MOV R4, #0
+rb_x:
+  MOV R0, R4
+  MOV R1, R5
+  CALL getocc
+  CMP R2, #0
+  BNE rb_snake
+  MOV R2, #T_EMPTY
+  BRA rb_set
+rb_snake:
+  MOV R2, #T_SNAKE
+rb_set:
+  MOV R0, R4
+  MOV R1, R5
+  CALL setcell
+  ADD R4, #1
+  CMP R4, #GW
+  BLT rb_x
+  ADD R5, #1
+  CMP R5, #GH
+  BLT rb_y
+  LDW R0, [foodX]
+  LDW R1, [foodY]
+  MOV R2, #T_FOOD
+  CALL setcell
+  RET
+
+; ---- dim the playfield palette (entries 1..3) while paused ----
+dimpal:
+  MOV R0, #1
+  STB R0, [PAL_INDEX]
+  MOV R0, #$01C0          ; dim green
+  STW R0, [PAL_DATA]
+  MOV R0, #$000C          ; dim red
+  STW R0, [PAL_DATA]
+  MOV R0, #$2108          ; dim gray
+  STW R0, [PAL_DATA]
+  RET
+
+; ---- restore the normal playfield palette ----
+litpal:
+  MOV R0, #1
+  STB R0, [PAL_INDEX]
+  MOV R0, #$03E0          ; green
+  STW R0, [PAL_DATA]
+  MOV R0, #$001F          ; red
+  STW R0, [PAL_DATA]
+  MOV R0, #$4210          ; gray
+  STW R0, [PAL_DATA]
   RET
 
 ; ---- sfx(R0=period, R1=timer frames): blip on SQ0 ----
@@ -724,8 +924,12 @@ str_push:
   DB 15,20,18,7,26,18,19,0,17,19,$FF        ; PUSH START
 str_over:
   DB 6,0,12,4,26,14,21,4,17,$FF             ; GAME OVER
-str_move:
-  DB 0,17,17,14,22,18,26,12,14,21,4,$FF     ; ARROWS MOVE
+str_hi:
+  DB 7,8,$FF                                 ; HI
+str_legend:
+  DB 3,15,0,3,26,12,14,21,4,26,26,26,18,19,0,17,19,$FF  ; DPAD MOVE   START
+str_paused:
+  DB 15,0,20,18,4,3,$FF                     ; PAUSED
 
 ; --- thin 2px line tile (rows 3-4 lit, colour 3) ---
 linetile:

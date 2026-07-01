@@ -11,11 +11,11 @@ const root = path.join(__dirname, '..')
 // embed cartridges so the shell runs from file:// with no fetch
 const { buildCart } = require(path.join(root, 'cpu', 'cart.js'))
 const examplesDir = path.join(root, 'examples')
-const embedCart = (file, title) => Buffer.from(
-  buildCart(fs.readFileSync(path.join(examplesDir, file), 'utf8'), { title, readBinary: rel => fs.readFileSync(path.resolve(examplesDir, rel)) })
+const embedCart = (file, title, hasSave = false) => Buffer.from(
+  buildCart(fs.readFileSync(path.join(examplesDir, file), 'utf8'), { title, hasSave, readBinary: rel => fs.readFileSync(path.resolve(examplesDir, rel)) })
 ).toString('base64')
 const pongB64 = embedCart('pong.asm', 'PONG')
-const snakeB64 = embedCart('snake.asm', 'SNAKE')
+const snakeB64 = embedCart('snake.asm', 'SNAKE', true)   // Snake persists a high score
 const palmblastB64 = embedCart('palmblast.asm', 'PalmBlast')
 
 // module id -> source file (id mirrors the path so relative requires resolve)
