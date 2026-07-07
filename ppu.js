@@ -20,6 +20,10 @@ class FantasyPPU {
     this.layers=[this.makeLayer(0),this.makeLayer(1)]
     this.sprites=Array.from({length:FantasyPPU.SPRITE_COUNT},()=>this.makeSprite())
     this.affineLines=Array(FantasyPPU.HEIGHT).fill(null)
+    // affine map geometry + wrap mode (defaults reproduce the legacy 64x64 toroidal map)
+    this.affineMapW=FantasyPPU.MAP_WIDTH
+    this.affineMapH=FantasyPPU.MAP_HEIGHT
+    this.affineWrap=true            // true = repeat (modulo, current behaviour); false = transparent outside
     this.metrics={maxSpritesOnLine:0,droppedSprites:0,visibleSprites:0}
     this.setPalette(0,0,0,0)
   }
@@ -38,6 +42,9 @@ class FantasyPPU {
     this.layers=[this.makeLayer(0),this.makeLayer(1)]
     this.sprites=Array.from({length:FantasyPPU.SPRITE_COUNT},()=>this.makeSprite())
     this.affineLines.fill(null)
+    this.affineMapW=FantasyPPU.MAP_WIDTH
+    this.affineMapH=FantasyPPU.MAP_HEIGHT
+    this.affineWrap=true
     this.setPalette(0,0,0,0)
   }
 
@@ -121,6 +128,33 @@ class FantasyPPU {
     return {colour:this.palette[(entry.palette<<4)|colour],priority:this.layers[layerIndex].basePriority+entry.priority}
   }
 
+  // Affine (Mode-7) sample at world pixel (worldX,worldY). Uses the configurable
+  // affine map size/stride and wrap mode. With the defaults (64x64, repeat) this is
+  // byte-for-byte identical to the sampleLayer path; with wrap disabled a coordinate
+  // whose tile falls outside [0,W) x [0,H) returns null so the backdrop shows through
+  // (the map becomes a single non-repeating island).
+  sampleAffine(layerIndex,worldX,worldY){
+    const W=this.affineMapW,H=this.affineMapH
+    let tileX=Math.floor(worldX/8)
+    let tileY=Math.floor(worldY/8)
+    if(this.affineWrap){
+      tileX=((tileX%W)+W)%W
+      tileY=((tileY%H)+H)%H
+    }else if(tileX<0||tileX>=W||tileY<0||tileY>=H){
+      return null
+    }
+    const raw=this.view.getUint32(FantasyPPU.MAP_OFFSETS[layerIndex]+(tileY*W+tileX)*4,true)
+    const tile=raw&0x7ff,palette=(raw>>>11)&15
+    const hflip=Boolean(raw&(1<<15)),vflip=Boolean(raw&(1<<16)),priority=(raw>>>17)&3
+    let px=((worldX%8)+8)%8
+    let py=((worldY%8)+8)%8
+    if(hflip)px=7-px
+    if(vflip)py=7-py
+    const colour=this.tilePixel(tile,px,py)
+    if(colour===0)return null
+    return {colour:this.palette[(palette<<4)|colour],priority:this.layers[layerIndex].basePriority+priority}
+  }
+
   drawLayerLine(layerIndex,y,pixels,priorities){
     const layer=this.layers[layerIndex]
     if(!layer.enabled)return
@@ -130,7 +164,7 @@ class FantasyPPU {
     for(let x=0;x<FantasyPPU.WIDTH;x++){
       const worldX=layer.affine?sx>>16:x+layer.scrollX
       const worldY=layer.affine?sy>>16:y+layer.scrollY
-      const sample=this.sampleLayer(layerIndex,worldX,worldY)
+      const sample=layer.affine?this.sampleAffine(layerIndex,worldX,worldY):this.sampleLayer(layerIndex,worldX,worldY)
       const out=y*FantasyPPU.WIDTH+x
       if(sample&&sample.priority>=priorities[out]){
         pixels[out]=sample.colour

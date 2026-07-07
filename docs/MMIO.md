@@ -16,7 +16,7 @@ implemented by the engine, within the [MEMORY_MAP.md](MEMORY_MAP.md) windows.
 | `$100020` | `DMA_SRC` | write 3 bytes | 24-bit source address in CPU space |
 | `$100024` | `DMA_DST` | write u16 | destination offset within the destination space |
 | `$100028` | `DMA_LEN` | write u16 | byte length |
-| `$10002A` | `DMA_MODE` | write u8 | bits0-1 space (0 VRAM, 1 OAM, 2 palette), bit4 = constant fill |
+| `$10002A` | `DMA_MODE` | write u8 | bits0-1 space (0 VRAM, 1 OAM, 2 palette, 3 affine table), bit4 = constant fill |
 | `$10002C` | `DMA_FILL` | write u16 | fill value (fill mode) |
 | `$10002E` | `DMA_CTRL` | write u8 | bit0 = start the transfer |
 
@@ -33,10 +33,26 @@ implemented by the engine, within the [MEMORY_MAP.md](MEMORY_MAP.md) windows.
 | `$101010..$101016` | `BG0_SX/SY`, `BG1_SX/SY` | write u16 | signed background scroll |
 | `$101018` | `PPU_CTRL` | write u16 | bit0 BG0 enable, bit1 BG1 enable |
 | `$10101A` | `PPU_SCANLINE` | read u16 | current scanline (0-261; vblank starts at 224) |
+| `$10101C` | `AFFINE_CTRL` | write u16 | bit0 = affine enable, bit1 = which layer is affine (0 = BG0, 1 = BG1), bit2 reserved (page, single-buffered in v0.2), bit3 = transparent-outside (0 = repeat/toroidal, the default) |
+| `$10101E` | `AFFINE_FIRST` | write u16 | first affine scanline: affine-table row 0 maps to this line |
+| `$101020` | `AFFINE_LAST` | write u16 | last affine scanline (inclusive; informational in v0.2) |
+| `$101022` | `AFFINE_MAPSZ` | write u8 | affine map size as log2(tiles per side): 6 = 64×64 (default), 7 = 128×128 |
 
 OAM descriptor (8 bytes, little-endian, per `PPU.md`): X (s16),
 Y (s16), tile (bits 0-10), attr (palette 0-3, size 4-5, hflip 6, vflip 7,
 priority 8-10, enable 15).
+
+### Affine (Mode-7) line table
+
+The per-scanline affine parameters are too much data for register pokes, so they
+arrive by DMA: set `DMA_MODE` space 3 and blast an `N×16`-byte table from CPU
+memory. Each 16-byte row is four signed 32-bit little-endian values in **16.16
+fixed point**: `startX, startY, dx, dy`. Row *i* drives scanline
+`AFFINE_FIRST + i`: the PPU samples the layer's tile map starting at
+(`startX`,`startY`), stepping by (`dx`,`dy`) per screen pixel. An affine DMA
+clears the whole table first, so any scanline the table does not cover renders
+transparent and the other layer shows through (a free horizon). See `PPU.md` for
+the layer semantics.
 
 ## Audio / APU (`$102000`)
 

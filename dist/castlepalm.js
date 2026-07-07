@@ -767,6 +767,10 @@ class FantasyPPU {
     this.layers=[this.makeLayer(0),this.makeLayer(1)]
     this.sprites=Array.from({length:FantasyPPU.SPRITE_COUNT},()=>this.makeSprite())
     this.affineLines=Array(FantasyPPU.HEIGHT).fill(null)
+    // affine map geometry + wrap mode (defaults reproduce the legacy 64x64 toroidal map)
+    this.affineMapW=FantasyPPU.MAP_WIDTH
+    this.affineMapH=FantasyPPU.MAP_HEIGHT
+    this.affineWrap=true            // true = repeat (modulo, current behaviour); false = transparent outside
     this.metrics={maxSpritesOnLine:0,droppedSprites:0,visibleSprites:0}
     this.setPalette(0,0,0,0)
   }
@@ -785,6 +789,9 @@ class FantasyPPU {
     this.layers=[this.makeLayer(0),this.makeLayer(1)]
     this.sprites=Array.from({length:FantasyPPU.SPRITE_COUNT},()=>this.makeSprite())
     this.affineLines.fill(null)
+    this.affineMapW=FantasyPPU.MAP_WIDTH
+    this.affineMapH=FantasyPPU.MAP_HEIGHT
+    this.affineWrap=true
     this.setPalette(0,0,0,0)
   }
 
@@ -868,6 +875,33 @@ class FantasyPPU {
     return {colour:this.palette[(entry.palette<<4)|colour],priority:this.layers[layerIndex].basePriority+entry.priority}
   }
 
+  // Affine (Mode-7) sample at world pixel (worldX,worldY). Uses the configurable
+  // affine map size/stride and wrap mode. With the defaults (64x64, repeat) this is
+  // byte-for-byte identical to the sampleLayer path; with wrap disabled a coordinate
+  // whose tile falls outside [0,W) x [0,H) returns null so the backdrop shows through
+  // (the map becomes a single non-repeating island).
+  sampleAffine(layerIndex,worldX,worldY){
+    const W=this.affineMapW,H=this.affineMapH
+    let tileX=Math.floor(worldX/8)
+    let tileY=Math.floor(worldY/8)
+    if(this.affineWrap){
+      tileX=((tileX%W)+W)%W
+      tileY=((tileY%H)+H)%H
+    }else if(tileX<0||tileX>=W||tileY<0||tileY>=H){
+      return null
+    }
+    const raw=this.view.getUint32(FantasyPPU.MAP_OFFSETS[layerIndex]+(tileY*W+tileX)*4,true)
+    const tile=raw&0x7ff,palette=(raw>>>11)&15
+    const hflip=Boolean(raw&(1<<15)),vflip=Boolean(raw&(1<<16)),priority=(raw>>>17)&3
+    let px=((worldX%8)+8)%8
+    let py=((worldY%8)+8)%8
+    if(hflip)px=7-px
+    if(vflip)py=7-py
+    const colour=this.tilePixel(tile,px,py)
+    if(colour===0)return null
+    return {colour:this.palette[(palette<<4)|colour],priority:this.layers[layerIndex].basePriority+priority}
+  }
+
   drawLayerLine(layerIndex,y,pixels,priorities){
     const layer=this.layers[layerIndex]
     if(!layer.enabled)return
@@ -877,7 +911,7 @@ class FantasyPPU {
     for(let x=0;x<FantasyPPU.WIDTH;x++){
       const worldX=layer.affine?sx>>16:x+layer.scrollX
       const worldY=layer.affine?sy>>16:y+layer.scrollY
-      const sample=this.sampleLayer(layerIndex,worldX,worldY)
+      const sample=layer.affine?this.sampleAffine(layerIndex,worldX,worldY):this.sampleLayer(layerIndex,worldX,worldY)
       const out=y*FantasyPPU.WIDTH+x
       if(sample&&sample.priority>=priorities[out]){
         pixels[out]=sample.colour
@@ -1045,7 +1079,7 @@ const REG = {
   DMA_SRC: 0x100020,      // 3 bytes: 24-bit source in CPU space
   DMA_DST: 0x100024,      // u16 destination offset within the dest space
   DMA_LEN: 0x100028,      // u16 byte length
-  DMA_MODE: 0x10002a,     // u8: bits0-1 space (0 VRAM, 1 OAM, 2 palette), bit4 fill
+  DMA_MODE: 0x10002a,     // u8: bits0-1 space (0 VRAM, 1 OAM, 2 palette, 3 affine table), bit4 fill
   DMA_FILL: 0x10002c,     // u16 fill value
   DMA_CTRL: 0x10002e,     // u8: bit0 start
   VRAM_ADDR: 0x101000,    // 3 bytes: 17-bit VRAM pointer
@@ -1057,6 +1091,10 @@ const REG = {
   BG0_SX: 0x101010, BG0_SY: 0x101012, BG1_SX: 0x101014, BG1_SY: 0x101016,
   PPU_CTRL: 0x101018,     // u16: bit0 BG0 enable, bit1 BG1 enable
   PPU_SCANLINE: 0x10101a, // u16 current scanline (read)
+  AFFINE_CTRL: 0x10101c,  // u16: bit0 enable, bit1 layer (0=BG0,1=BG1), bit2 page (reserved, single-buffered in v0.2)
+  AFFINE_FIRST: 0x10101e, // u16 first affine scanline (affine-table row 0 maps to this line)
+  AFFINE_LAST: 0x101020,  // u16 last affine scanline (inclusive; informational in v0.2)
+  AFFINE_MAPSZ: 0x101022, // u8 affine map size as log2(tiles/side): 6=64 (default), 7=128
 }
 const c5to8 = c => (c << 3) | (c >> 2)
 
@@ -1071,6 +1109,8 @@ class System {
     this.irqEnable = 0
     this.va = 0; this.pi = 0; this.pl = 0; this.oi = 0
     this.scroll = [0, 0, 0, 0]
+    this.affCtrl = 0; this.affFirst = 0; this.affLast = 0   // affine (Mode-7) layer state
+    this.affMapSz = 6                                       // log2 tiles/side (6=64); default keeps the legacy map
     this.oam = new Uint8Array(1024)
     this.dma = { src: 0, dst: 0, len: 0, mode: 0, fill: 0 }
     this.dmaBytes = 0
@@ -1128,6 +1168,14 @@ class System {
       case REG.IRQ_ENABLE: this.irqEnable = b & 3; return
       case REG.IRQ_FLAGS: this.irqFlags &= ~b; this.vblank = !!(this.irqFlags & 1); return
       case REG.PPU_CTRL: this.ppu.layers[0].enabled = !!(b & 1); this.ppu.layers[1].enabled = !!(b & 2); return
+      case REG.AFFINE_CTRL: this.affCtrl = (this.affCtrl & 0xff00) | b; this.applyAffineCtrl(); return
+      case REG.AFFINE_CTRL + 1: this.affCtrl = (this.affCtrl & 0x00ff) | (b << 8); this.applyAffineCtrl(); return
+      case REG.AFFINE_FIRST: this.affFirst = (this.affFirst & 0xff00) | b; return
+      case REG.AFFINE_FIRST + 1: this.affFirst = (this.affFirst & 0x00ff) | (b << 8); return
+      case REG.AFFINE_LAST: this.affLast = (this.affLast & 0xff00) | b; return
+      case REG.AFFINE_LAST + 1: this.affLast = (this.affLast & 0x00ff) | (b << 8); return
+      case REG.AFFINE_MAPSZ: this.affMapSz = (this.affMapSz & 0xff00) | b; this.applyAffineMapsz(); return
+      case REG.AFFINE_MAPSZ + 1: this.affMapSz = (this.affMapSz & 0x00ff) | (b << 8); this.applyAffineMapsz(); return
       case REG.DMA_SRC: this.dma.src = (this.dma.src & 0xffff00) | b; return
       case REG.DMA_SRC + 1: this.dma.src = (this.dma.src & 0xff00ff) | (b << 8); return
       case REG.DMA_SRC + 2: this.dma.src = (this.dma.src & 0x00ffff) | (b << 16); return
@@ -1161,7 +1209,22 @@ class System {
     }
   }
 
-  // one DMA transfer: CPU memory -> VRAM / OAM / palette, or constant fill.
+  // affine enable/layer select + wrap mode: only the chosen layer samples via
+  // affineLines. bit3 = transparent-outside (0 = repeat/toroidal, the v0.2 default).
+  applyAffineCtrl() {
+    const en = this.affCtrl & 1, layer = (this.affCtrl >> 1) & 1
+    this.ppu.layers[0].affine = !!(en && layer === 0)
+    this.ppu.layers[1].affine = !!(en && layer === 1)
+    this.ppu.affineWrap = !((this.affCtrl >> 3) & 1)
+  }
+
+  // affine map size: byte = log2(tiles per side). 6 -> 64x64 (default), 7 -> 128x128.
+  applyAffineMapsz() {
+    const bits = this.affMapSz & 15, n = bits >= 4 ? (1 << bits) : 64
+    this.ppu.affineMapW = n; this.ppu.affineMapH = n
+  }
+
+  // one DMA transfer: CPU memory -> VRAM / OAM / palette / affine table, or constant fill.
   runDMA() {
     const d = this.dma, space = d.mode & 3, fill = !!(d.mode & 0x10)
     const srcByte = i => fill ? ((i & 1) ? (d.fill >> 8) & 0xff : d.fill & 0xff) : this.cpu.read8((d.src + i) & 0xffffff)
@@ -1169,6 +1232,14 @@ class System {
       for (let i = 0; i + 1 < d.len; i += 2) {
         const w = srcByte(i) | (srcByte(i + 1) << 8), e = ((d.dst + i) >> 1) & 0xff
         this.ppu.setPalette(e, c5to8(w & 31), c5to8((w >> 5) & 31), c5to8((w >> 10) & 31))
+      }
+    } else if (space === 3) {                 // affine table: 16 bytes/line (startX,startY,dx,dy s32 LE)
+      const al = this.ppu.affineLines, n = d.len >> 4
+      al.fill(null)                            // band starts clean; lines outside it stay transparent
+      const s32 = o => (srcByte(o) | (srcByte(o + 1) << 8) | (srcByte(o + 2) << 16) | (srcByte(o + 3) << 24)) | 0
+      for (let i = 0; i < n; i++) {
+        const y = this.affFirst + i, o = i << 4
+        if (y >= 0 && y < al.length) al[y] = { startX: s32(o), startY: s32(o + 4), dx: s32(o + 8), dy: s32(o + 12) }
       }
     } else {
       const buf = space === 1 ? this.oam : this.ppu.vram

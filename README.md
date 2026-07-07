@@ -9,7 +9,7 @@ beyond Node**.
 ▶ **Play in your browser:** **[Castle Arcade](https://castle-arcade.octonion.io/)** — and load your own `.cpc` with **Load cartridge…** or drag-and-drop.
 
 ## The console at a glance
-- **320×224** screen, 4bpp tiles, two scrolling background layers, **128 sprites**
+- **320×224** screen, 4bpp tiles, two scrolling background layers (one can go **affine / Mode-7**), **128 sprites**
 - SNES-style pad: **D-pad, A / B / X / Y, Start**
 - 2 square + 1 noise audio channels
 - **Deterministic:** the same input always produces the same frame (great for testing)

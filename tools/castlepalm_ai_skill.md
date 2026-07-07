@@ -126,7 +126,13 @@ Bits: `UP=1 DOWN=2 LEFT=4 RIGHT=8 A=16 B=32 X=64 Y=128 START=256 POWER=512`.
 `PAL_INDEX $101008` · `PAL_DATA $10100A` (RGB555, auto-inc) ·
 `OAM_INDEX $10100C` (byte offset; slot *n* = `n*8`) · `OAM_DATA $10100E` (auto-inc) ·
 `BG0_SX/SY`, `BG1_SX/SY` `$101010..$101016` · `PPU_CTRL $101018` (bit0 BG0, bit1 BG1) ·
-`PPU_SCANLINE $10101A`.
+`PPU_SCANLINE $10101A` ·
+`AFFINE_CTRL $10101C` (bit0 enable, bit1 layer, bit3 transparent-outside) ·
+`AFFINE_FIRST $10101E` / `AFFINE_LAST $101020` (affine scanline band) ·
+`AFFINE_MAPSZ $101022` (log2 tiles/side: 6=64 default, 7=128).
+Affine (Mode-7) per-line parameters go in by DMA space 3: 16 bytes/line =
+`startX, startY, dx, dy` (each s32 16.16), row 0 = line `AFFINE_FIRST`; the DMA
+clears the table first, so uncovered lines stay transparent (the horizon).
 
 **OAM descriptor** (8 bytes, little-endian): X (s16), Y (s16), tile (bits 0–10),
 attr (palette 0–3, size bits 4–5, hflip 6, vflip 7, priority 8–10, **enable bit 15**).
@@ -134,7 +140,7 @@ The enable bit is `$80` in the high attr byte; zeroing OAM hides everything.
 
 **Interrupts/DMA:** `IRQ_FLAGS $100010` (write-1-clear, bit0 vblank), `IRQ_ENABLE
 $100012`, `FRAME $100014`; `DMA_SRC $100020` / `DMA_DST $100024` / `DMA_LEN $100028` /
-`DMA_MODE $10002A` (space: 0 VRAM, 1 OAM, 2 palette; bit4 = constant fill) /
+`DMA_MODE $10002A` (space: 0 VRAM, 1 OAM, 2 palette, 3 affine table; bit4 = constant fill) /
 `DMA_FILL $10002C` / `DMA_CTRL $10002E` (bit0 start). Prefer DMA over port loops for
 bulk transfers (tile sheets, OAM lists, palettes).
 

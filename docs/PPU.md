@@ -45,6 +45,28 @@ Two `64×64`-tile maps that wrap and scroll independently:
 
 (The Snake and PalmBlast examples drive the background; Pong is sprites-only.)
 
+## Affine (Mode-7) layer
+
+One background layer can be switched into **affine mode**: instead of scrolling,
+each scanline samples the layer's tile map along its own line, with an arbitrary
+start point and per-pixel step in **16.16 fixed point**. Pick the right
+parameters per line and a flat tile map becomes a ground plane receding to the
+horizon; rotate the step vector over time and the whole plane rotates (the SNES
+"Mode 7" effect).
+
+- Enable with `AFFINE_CTRL` bit0, and choose which layer is affine with bit1
+  (the other layer keeps normal scrolling, e.g. for the sky).
+- Upload the per-line table with a **DMA to space 3**: 16 bytes per line
+  (`startX, startY, dx, dy`, each s32 16.16), where row 0 maps to the scanline
+  in `AFFINE_FIRST`. The DMA clears the table first, so lines outside the band
+  stay transparent and the non-affine layer shows through above the horizon.
+- By default the map repeats (toroidal). Set `AFFINE_CTRL` bit3 to make
+  coordinates outside the map transparent instead (a single non-repeating
+  island). `AFFINE_MAPSZ` grows the sampled map from 64×64 tiles (default) to
+  128×128.
+
+Register addresses are in [MMIO.md](MMIO.md).
+
 ## Sprites (OAM)
 
 128 sprite slots in a 1 KiB OAM, **8 bytes each**, written via `OAM_INDEX` (byte
