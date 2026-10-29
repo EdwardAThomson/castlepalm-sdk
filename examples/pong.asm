@@ -43,6 +43,8 @@ gover  EQU $000110
 sfxT   EQU $000112
 started EQU $000114        ; 0 = title screen, 1 = playing
 diff    EQU $000116        ; 0=easy 1=normal 2=hard (AI paddle speed = diff+1)
+paused  EQU $000118        ; 0 = running, 1 = paused (Start toggles during play)
+prevStart EQU $00011A      ; previous-frame Start bit, for edge detection
 
   ORG $300000
   DA start
@@ -169,13 +171,40 @@ sf_title:
 sf_run:
   LDW R0, [gover]
   CMP R0, #0
-  BEQ playing
+  BEQ play_active
   LDW R0, [INPUT]
   AND R0, #START
   BEQ overdraw
   CALL resetgame
 overdraw:
   CALL drawsprites
+  WAIT
+  BRA mainloop
+
+; active play: a Start edge toggles pause; while paused, freeze all updates
+play_active:
+  LDW R0, [INPUT]
+  AND R0, #START
+  LDW R1, [prevStart]
+  STW R0, [prevStart]
+  CMP R1, #0
+  BNE pa_done          ; Start held last frame -> no fresh edge
+  CMP R0, #0
+  BEQ pa_done          ; Start not down now -> no edge
+  LDW R1, [paused]     ; fresh edge -> flip pause
+  CMP R1, #0
+  BNE pa_unpause
+  MOV R1, #1
+  STW R1, [paused]
+  BRA pa_done
+pa_unpause:
+  MOV R1, #0
+  STW R1, [paused]
+pa_done:
+  LDW R0, [paused]
+  CMP R0, #0
+  BEQ playing          ; not paused -> run the normal update
+  CALL drawpause       ; paused -> skip update entirely (deterministic), draw overlay
   WAIT
   BRA mainloop
 
@@ -395,6 +424,12 @@ resetgame:
   MOV R0, #2
   STW R0, [ballVX]
   STW R0, [ballVY]
+  ; pause state: clear, and seed prevStart as held so the Start that began
+  ; (or restarted) play is not mistaken for a fresh pause edge next frame
+  MOV R0, #0
+  STW R0, [paused]
+  MOV R0, #START
+  STW R0, [prevStart]
   CALL resetball
   RET
 
@@ -530,6 +565,12 @@ ti_rp:
   MOV R5, #48
   LDA A1, #str_pong
   CALL prtext
+  ; control legend (CastlePalm standard): A SELECT   START
+  MOV R3, #$10
+  MOV R4, #32
+  MOV R5, #88
+  LDA A1, #str_legend
+  CALL prtext
   ; difficulty menu — tap A / B / X (or Start = normal)
   MOV R3, #$10
   MOV R4, #112
@@ -543,6 +584,22 @@ ti_rp:
   MOV R4, #112
   MOV R5, #196
   LDA A1, #str_hard
+  CALL prtext
+  RET
+
+; ---- pause overlay: clear the field (dimmed) and show PAUSED + resume hint ----
+drawpause:
+  CALL clearoam           ; wipe frozen paddles/ball/scores -> dark, dimmed screen
+  MOV R0, #0
+  STW R0, [OAM_INDEX]
+  MOV R3, #$10            ; size 16
+  MOV R4, #112            ; centred: (320 - 6*16)/2
+  MOV R5, #88
+  LDA A1, #str_paused
+  CALL prtext
+  MOV R4, #120            ; centred: (320 - 5*16)/2
+  MOV R5, #120
+  LDA A1, #str_start
   CALL prtext
   RET
 
@@ -573,6 +630,12 @@ str_norm:
   DB 1,26,13,14,17,12,0,11,$FF        ; B NORMAL
 str_hard:
   DB 23,26,7,0,17,3,$FF               ; X HARD
+str_legend:
+  DB 0,26,18,4,11,4,2,19,26,26,26,18,19,0,17,19,$FF   ; A SELECT   START
+str_paused:
+  DB 15,0,20,18,4,3,$FF               ; PAUSED
+str_start:
+  DB 18,19,0,17,19,$FF                ; START
 
 ; --- 16x16 4bpp digit font, tiles 16.. (4 tiles/digit, generated) ---
 digitdata:

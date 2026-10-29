@@ -3,7 +3,8 @@
 ;
 ;   Walk your hero along a scrolling sidewalk (8-way, D-pad), throw punches (A),
 ;   and clear the street of thugs. Enemies chase you, stagger and flash white when
-;   hit, and get knocked back; touch one and you lose a chunk of the health bar.
+;   hit, and get knocked back; they square up, wind a punch back (the tell) and swing, and
+;   only a landed punch costs health.
 ;   Three thug types mix in per wave (grunt / fast runner / tanky bruiser), driven
 ;   by the TYPE* stat tables + the wavedef spawn table. Clear a wave and the street
 ;   scrolls on; clear three waves and a boss to finish a stage, then an interstitial
@@ -15,13 +16,20 @@
 ;   chiptune riff loops on square-1 (SFX stay on square-0).
 ;
 ;   Controls:  D-pad = move    A = punch / swing    Start = begin / restart
+;   Character creator (after the title): Up/Down pick a row, Left/Right change it,
+;   A throws a test punch, Start fights. The pick is kept in save RAM.
 ;
-;   Art lives in assets.bin (built by gen_assets.js) and is INCBIN'd at the end,
-;   then copied to VRAM at boot. Build it first, then run the built .cpc (run.js
-;   can't read INCBIN from a .asm, but build-cart.js can):
-;       node examples/streetbrawl/gen_assets.js
+;   Art: examples/streetbrawl/gen_art.js draws everything (street, skyline, 64x64 shaded
+;   fighters, HUD font) and writes the blobs this cart INCBINs: tiles (DMA'd to VRAM),
+;   maps (BG0 skyline + BG1 street), the 256-entry palette, per-stage records (a
+;   224-line sky gradient + three recoloured banks), the player's selectable bodies
+;   and the creator's colour ramps. Build the art first:
+;       node examples/streetbrawl/gen_art.js
 ;       node tools/build-cart.js examples/streetbrawl/streetbrawl.asm streetbrawl.cpc BRAWL
-;       node tools/run.js streetbrawl.cpc 90 shot.png --start
+;
+;   Layers: BG0 = clouds + skyline, scrolled at cam/4 (parallax). BG1 = the street,
+;   with the HUD in map rows 0-1. An hblank handler rewrites palette entry 0 every
+;   line (the sky gradient) and holds BG1's scroll at 0 for lines 0-23 (HUD split).
 ; ============================================================================
 
 ; ---- MMIO ----
@@ -32,8 +40,17 @@ PAL_INDEX  EQU $101008
 PAL_DATA   EQU $10100A
 OAM_INDEX  EQU $10100C
 OAM_DATA   EQU $10100E
-BG0_SX     EQU $101010    ; BG0 horizontal scroll (signed 16-bit latch)
+BG0_SX     EQU $101010    ; BG0 horizontal scroll (signed 16-bit latch): skyline, parallax
+BG1_SX     EQU $101014    ; BG1 horizontal scroll: the street (set per line by the hblank handler)
 PPU_CTRL   EQU $101018
+PPU_LINE   EQU $10101A    ; current scanline (read)
+IRQ_ENABLE EQU $100012    ; bit1 = hblank
+FRAMECTR   EQU $100014    ; u16 frame counter (read)
+DMA_SRC    EQU $100020
+DMA_DST    EQU $100024
+DMA_LEN    EQU $100028
+DMA_MODE   EQU $10002A    ; 0 VRAM, 2 palette
+DMA_CTRL   EQU $10002E
 SQ0_PERIOD EQU $102000
 SQ0_VOL    EQU $102002
 SQ0_CTRL   EQU $102003
@@ -45,6 +62,7 @@ SAVECOMMIT EQU $100016    ; poke nonzero once save RAM holds a coherent record; 
 ; ---- cartridge save RAM ($200000-$207FFF): a per-browser best-kills high score ----
 SV_MAG   EQU $200000      ; u16 marker word (SVMAGIC = a valid Street Brawl save)
 SV_BEST  EQU $200002      ; u16 best kills across runs
+SV_CHAR  EQU $200004      ; 6 bytes: the creator's picks (same order as c_body..)
 SVMAGIC  EQU $B501        ; distinctive non-zero marker (fresh save RAM is all zeros)
 
 ; ---- input bits ----
@@ -55,29 +73,68 @@ RIGHT EQU 8
 ABTN  EQU 16
 START EQU 256
 
-; ---- tile sheet indices (must match gen_assets.js) ----
-BLANK    EQU 0
-BRICK    EQU 1
-SIDEWALK EQU 2
-ROAD     EQU 3
-CURB     EQU 4
-HP_FULL  EQU 5
+; ---- tile indices (must match T in examples/streetbrawl/gen_art.js) ----
+HP_FULL  EQU 5          ; 8x8 HUD cells
 HP_EMPTY EQU 6
 WPN_ICON EQU 8
 BHP_FULL EQU 9          ; boss health-bar cell
-PL_WALKA EQU 16
-PL_WALKB EQU 20
-PL_PUNCH EQU 24
-EN_WALKA EQU 32         ; grunt walk frames (A, and B at +4)
-EN_WALKB EQU 36
-EN2_WALKA EQU 112       ; runner walk frames (lean silhouette)
-EN3_WALKA EQU 120       ; bruiser walk frames (bulky silhouette)
-WEAPON   EQU 40         ; pipe pickup / held weapon (16x16)
-FOOD     EQU 44         ; food pickup (16x16)
-BOSS     EQU 48         ; boss (16x16)
-WEAPON_UP EQU 52        ; pipe raised mid-swing (16x16)
 FONT     EQU 64
 DIGIT    EQU 96         ; DIGIT + (0..9)
+PL_WALK  EQU 128        ; hero walk cycle: 4 frames of 64x64, 64 tiles apart (faces right)
+PL_PUNCH EQU 384
+PL_DOWN  EQU 448        ; knocked flat
+GR_WALK  EQU 512        ; grunt/runner walk: 2 frames (faces right)
+GR_DOWN  EQU 640
+BR_WALK  EQU 704        ; bruiser/boss walk: 2 frames (faces right)
+BR_DOWN  EQU 832
+SHADOW   EQU 896        ; 32x32 ground shadow
+WEAPON   EQU 912        ; 16x16 pipe (pickup / held)
+WEAPON_UP EQU 916       ; pipe raised mid-swing
+FOOD     EQU 920        ; 16x16 drumstick
+GR_WIND  EQU 924        ; thug attack: wind-up (the telegraph), then the punch 64 tiles on
+GR_PUNCH EQU 988
+BR_WIND  EQU 1052
+BR_PUNCH EQU 1116
+SOLID    EQU 16         ; 15 solid swatch cells: SOLID + k - 1 is filled with colour k
+ARROWL   EQU 91         ; font arrows for the creator
+ARROWR   EQU 92
+; ---- palette banks ----
+PB_HUD    EQU 0
+PB_FONT   EQU 3
+PB_FLASH  EQU 4         ; hit flash (all near-white)
+PB_PICK   EQU 5         ; pipe + food
+PB_BOSS   EQU 6
+PB_PLAYER EQU 9
+PB_SHADOW EQU 15
+; ---- sprite attr-lo sizes ----
+SZ16     EQU $10
+SZ32     EQU $20
+SZ64     EQU $30
+; ---- 64x64 fighter placement: feet sit at (px+8, py+16) ----
+FOFFX    EQU 24         ; sprite x = px - cam - FOFFX
+FOFFY    EQU 46         ; sprite y = py - FOFFY
+PL_BYTES EQU 12288      ; one selectable body: 6 frames x 64 tiles x 32 bytes (PL_WALK..PL_DOWN)
+NBODY    EQU 8
+PL_DST   EQU 4096       ; PL_WALK * 32: VRAM byte offset of the player's frames
+PB9PAL   EQU 290        ; palette byte offset of bank 9 entry 1 (PB_PLAYER*32 + 2)
+CP_HAIR  EQU 36         ; byte offsets into charpal: skin ramps (3 words) start at 0
+CP_TOP   EQU 68
+CP_LEGS  EQU 128
+CP_SHOES EQU 188
+CP_OL    EQU 220        ; outline word, then the trim word
+CP_TRIM  EQU 222
+CROWS    EQU 6          ; creator rows: body, skin, hair, top, legs, shoes
+CROW0    EQU 6          ; screen row of the first; one row every two
+CROWEND  EQU 18         ; CROW0 + CROWS*2
+CROWPY   EQU 48         ; CROW0 * 8 (cursor y)
+CLAB     EQU 15         ; label column
+CARL     EQU 22         ; left arrow column; values from CARL+2, right arrow at CARR
+CARR     EQU 30
+CURX     EQU 108        ; cursor x: CLAB*8 - 12
+PVX      EQU 32         ; creator preview sprite position
+PVY      EQU 136
+HUDLINES EQU 24         ; lines 0-23 show the HUD (BG1 unscrolled)
+LEVELREC EQU 534        ; bytes per stage record in levels.bin
 
 ; ---- tuning ----
 NENEM    EQU 8          ; enemy pool (on-screen slots); waves can fill up to this many
@@ -97,12 +154,19 @@ PICKR    EQU 14         ; pickup grab radius (centre distance)
 KB       EQU 3          ; enemy knockback px / frame while staggered
 HITSTUN  EQU 18         ; enemy stagger frames after a hit
 INVULN   EQU 30         ; player i-frames after taking a hit
-HITNEAR  EQU 13         ; enemy-vs-player contact distance
+ATKT     EQU 58         ; thug attack timer start: wind-up 57..45, punch 44..37, cooldown 36..1
+ATKSTRIKE EQU 44        ; the single frame the thug's fist is live
+ATKCD    EQU 36         ; cooldown: back to chasing, but no new attack until the timer runs out
+ATKRX    EQU 26         ; start an attack when the player is this close in x ...
+ATKRY    EQU 6          ; ... and on (nearly) the same row
+ATKREACH EQU 32         ; how far in front the punch lands (px between logic boxes)
+ATKHY    EQU 10         ; row tolerance for the punch to land
+ESTAND   EQU 20         ; thugs close to this x gap, not on top of the player
 HP0      EQU 16         ; starting health (= HP bar cells)
-BANDTOP  EQU 96         ; player/enemy vertical play band (py range)
+BANDTOP  EQU 112        ; player/enemy vertical play band (py range; feet = py+16, on the sidewalk/road)
 BANDBOT  EQU 190
-XMIN     EQU 4
-PXMAX    EQU 300        ; player reach to the right of the current camera limit
+XMIN     EQU 16
+PXMAX    EQU 288        ; player reach to the right of the current camera limit
 EXMAX    EQU 1500       ; enemy world-x clamp (knockback)
 ; ---- progression: each level is NORMW thug waves + a boss; clear all NLEVELS to win ----
 WAVEN    EQU 3          ; thugs on screen per normal wave (must be <= NENEM)
@@ -131,7 +195,7 @@ HSKILL   EQU 4          ; freeze frames on a kill
 NOTELEN  EQU 9          ; frames each note is held (tempo)
 
 ; ---- RAM ----
-state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over
+state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over, 4 interstitial, 5 creator
 in_now   EQU $000104
 in_prev  EQU $000106
 sfxT     EQU $000108
@@ -163,6 +227,13 @@ mT       EQU $000160    ; music: frames left on the current note
 eidx     EQU $000162    ; index of the enemy currently being processed (type lookups)
 best     EQU $000164    ; best kills across runs (loaded from save RAM at boot)
 svrem    EQU $000166    ; scratch: running value during decimal-digit extraction
+sprpri   EQU $000168    ; sprite priority for the next emittile (2 = under fighters, 3..7 = depth)
+wframe   EQU $00016A    ; frame counter latched by the main loop's wait
+c_sel    EQU $00016C    ; creator: selected row (0..CROWS-1)
+c_edge   EQU $00016E    ; creator: buttons newly pressed this frame
+c_body   EQU $000170    ; creator picks, one byte each: body, skin, hair, top, legs, shoes
+CHARPAL  EQU $000600    ; 15 words: the player's bank, assembled from the picks
+SKYTAB   EQU $000400    ; 224 RGB555 words: this stage's sky, one per scanline (hblank reads it)
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
 hbx1     EQU $000132
 hby0     EQU $000134
@@ -170,6 +241,7 @@ hby1     EQU $000136
 ENEMY    EQU $000200    ; NENEM slots x 8 bytes  ($0200..$023F for 8 slots)
 ;   +0 alive  +1 hp  +2 hurt(stagger)  +3 faceRight  +4 px(u16)  +6 py(u16)
 ETYPE    EQU $000248    ; parallel array: 1 type byte per enemy slot (keeps the 8-byte stride)
+EATK     EQU $000250    ; parallel array: attack timer per enemy slot (0 = idle, see ATKT)
 NPICK    EQU 4          ; max pickups live at once
 PICKUP   EQU $000260    ; NPICK slots x 8 bytes
 ;   +0 type (0 none, 1 pipe, 2 food)  +2 px(u16)  +4 py(u16)
@@ -206,16 +278,15 @@ END EQU $FF
 
   ORG $300000
   DA start
-  DA 0
-  DA 0
+  DA 0                     ; vblank (unused)
+  DA hblank                ; per-line sky colour + HUD scroll split
   DA 0
 
 ; ============================ boot ============================
 start:
-  CALL setpal
-  CALL copysheet
+  CALL loadart             ; tiles -> VRAM, palette, stage-1 sky
   MOV R0, #3
-  STW R0, [PPU_CTRL]        ; enable BG0 (scrolling street) + BG1 (fixed HUD overlay)
+  STW R0, [PPU_CTRL]        ; enable BG0 (skyline) + BG1 (street + HUD)
   MOV R0, #0
   STW R0, [in_now]
   STW R0, [in_prev]
@@ -226,9 +297,13 @@ start:
   STW R0, [mIdx]           ; start the music loop from the top
   STW R0, [mT]
   CALL loadsave            ; restore best-kills from cartridge save RAM (0 if none)
+  CALL loadchar            ; and the saved fighter (body tiles + player bank)
   CALL drawtitle
   MOV R0, #0
   STW R0, [state]
+  MOV R0, #2
+  STB R0, [IRQ_ENABLE]     ; hblank IRQ on
+  EI
 
 mainloop:
   CALL readpad
@@ -237,6 +312,8 @@ mainloop:
   BEQ ml_play
   CMP R0, #4
   BEQ ml_inter
+  CMP R0, #5
+  BEQ ml_create
   CALL menuframe
   BRA ml_wait
 ml_play:
@@ -244,11 +321,57 @@ ml_play:
   BRA ml_wait
 ml_inter:
   CALL interframe
+  BRA ml_wait
+ml_create:
+  CALL creatorframe
 ml_wait:
   CALL sfxtick
   CALL musictick
+  LDW R0, [FRAMECTR]       ; hblank IRQs also wake WAIT: sleep until the frame counter moves
+  STW R0, [wframe]
+ml_sleep:
   WAIT
+  LDW R0, [FRAMECTR]
+  LDW R1, [wframe]
+  CMP R0, R1
+  BEQ ml_sleep
   BRA mainloop
+
+; ---- hblank: runs after each visible line; sets up the NEXT line ----
+;   palette entry 0 (the backdrop) = SKYTAB[line]; BG1 scroll = 0 for the HUD band
+;   (lines 0..HUDLINES-1) and the camera below it. Line 223's call primes line 0.
+hblank:
+  PUSH R0
+  PUSH R1
+  PUSHA A0
+  LDW R0, [PPU_LINE]
+  ADD R0, #1
+  CMP R0, #224
+  BLT hb_line
+  MOV R0, #0
+hb_line:
+  CMP R0, #0
+  BNE hb_cam
+  MOV R1, #0
+  STW R1, [BG1_SX]         ; HUD band: unscrolled
+  BRA hb_sky
+hb_cam:
+  CMP R0, #HUDLINES
+  BNE hb_sky
+  LDW R1, [cam]
+  STW R1, [BG1_SX]         ; street band: follow the camera
+hb_sky:
+  SHL R0, #1
+  LDA A0, #SKYTAB
+  ADD A0, R0
+  LDW R1, [A0]
+  MOV R0, #0
+  STB R0, [PAL_INDEX]
+  STW R1, [PAL_DATA]       ; backdrop colour for the next line
+  POPA A0
+  POP R1
+  POP R0
+  IRET
 
 ; ---- sample controller, remembering last frame for edge detection ----
 readpad:
@@ -270,7 +393,7 @@ menuframe:
   LDW R0, [state]
   CMP R0, #0
   BNE mf_back
-  CALL newgame             ; from title -> start playing
+  CALL drawcreator         ; from title -> pick a fighter
   RET
 mf_back:
   CALL drawtitle           ; from win/over -> back to title
@@ -624,6 +747,13 @@ ea_run:
   LDB R0, [A1+#2]         ; staggered?
   CMP R0, #0
   BEQ ea_chase
+  CALL atkptr             ; a hit cuts a wind-up or punch short (straight to cooldown)
+  LDB R1, [A2]
+  CMP R1, #ATKCD
+  BLE ea_stg
+  MOV R1, #ATKCD
+  STB R1, [A2]
+ea_stg:
   SUB R0, #1
   STB R0, [A1+#2]
   LDW R4, [A1+#4]         ; knock away from player in x
@@ -646,22 +776,43 @@ ea_kbs:
   STW R4, [A1+#4]
   RET
 ea_chase:
+  CALL atkptr             ; attack timer: wind-up / punch hold the thug still
+  LDB R0, [A2]
+  CMP R0, #0
+  BEQ ea_move
+  SUB R0, #1
+  STB R0, [A2]
+  CMP R0, #ATKCD
+  BLE ea_move             ; cooldown: chase again
+  CMP R0, #ATKSTRIKE
+  BNE ea_hold
+  CALL estrike            ; the fist is live this frame
+ea_hold:
+  RET
+ea_move:
   LDW R4, [A1+#4]         ; ex
   LDW R5, [A1+#6]         ; ey
   CALL curspd            ; R0 = this enemy's speed (0 on a bruiser's rest frame)
   MOV R3, R0             ; hold speed in R3 across the move
-  LDW R6, [p_x]
+  LDW R6, [p_x]          ; stand off ESTAND px to whichever side the thug is on
   CMP R4, R6
-  BEQ ea_cy
+  BLT ea_tl
+  ADD R6, #ESTAND
+  BRA ea_tx
+ea_tl:
+  SUB R6, #ESTAND
+ea_tx:
+  MOV R0, R4             ; close enough in x -> hold (no 1 px jitter)
+  SUB R0, R6
+  CALL absr0
+  CMP R0, R3
+  BLE ea_cy
+  CMP R4, R6
   BLT ea_cxr
   SUB R4, R3
-  MOV R0, #0
-  STB R0, [A1+#3]         ; faces left
   BRA ea_cy
 ea_cxr:
   ADD R4, R3
-  MOV R0, #1
-  STB R0, [A1+#3]         ; faces right
 ea_cy:
   LDW R6, [p_y]
   CMP R5, R6
@@ -674,26 +825,69 @@ ea_cyd:
 ea_cstore:
   STW R4, [A1+#4]
   STW R5, [A1+#6]
-  ; contact with player? (centres within HITNEAR on both axes)
-  LDW R6, [p_x]
+  LDW R6, [p_x]           ; face the player
+  MOV R0, #0
+  CMP R4, R6
+  BGE ea_face
+  MOV R0, #1
+ea_face:
+  STB R0, [A1+#3]
+  ; in reach and on the row? start an attack (wind-up first, so it can be read)
+  CALL atkptr
+  LDB R0, [A2]
+  CMP R0, #0
+  BNE ea_done
   MOV R0, R4
   SUB R0, R6
   CALL absr0
-  CMP R0, #HITNEAR
-  BGE ea_done
+  CMP R0, #ATKRX
+  BGT ea_done
   LDW R6, [p_y]
   MOV R0, R5
   SUB R0, R6
   CALL absr0
-  CMP R0, #HITNEAR
-  BGE ea_done
-  LDW R0, [p_hurt]        ; only if not in i-frames
-  CMP R0, #0
-  BNE ea_done
-  CALL curdmg            ; R0 = this enemy type's contact damage
-  MOV R2, R0
-  CALL hurtplayer        ; R4 = enemy x (knock direction), R2 = damage
+  CMP R0, #ATKRY
+  BGT ea_done
+  MOV R0, #ATKT
+  STB R0, [A2]
 ea_done:
+  RET
+
+; ---- atkptr: A2 = &EATK[eidx] (this enemy's attack timer). Scratches R1. ----
+atkptr:
+  LDW R1, [eidx]
+  LDA A2, #EATK
+  ADD A2, R1
+  RET
+
+; ---- estrike(A1=slot): the punch lands if the player is in front, in reach, on the
+;      row and not in i-frames. Damage is the type's TYPEDMG (bruisers hit for 2). ----
+estrike:
+  LDW R4, [A1+#4]
+  LDW R5, [A1+#6]
+  LDW R0, [p_y]
+  SUB R0, R5
+  CALL absr0
+  CMP R0, #ATKHY
+  BGT ek_miss
+  LDW R0, [p_x]           ; d = distance in front of the thug
+  SUB R0, R4
+  LDB R1, [A1+#3]
+  CMP R1, #0
+  BNE ek_fwd
+  NEG R0                  ; facing left: in front means px < ex
+ek_fwd:
+  CMP R0, #0
+  BLT ek_miss
+  CMP R0, #ATKREACH
+  BGT ek_miss
+  LDW R0, [p_hurt]
+  CMP R0, #0
+  BNE ek_miss
+  CALL curdmg
+  MOV R2, R0
+  CALL hurtplayer         ; R4 = thug x (knock direction), R2 = damage
+ek_miss:
   RET
 
 ; ---- hurtplayer(R4=enemy x, R2=damage): lose health, i-frames, shake, shove away ----
@@ -760,7 +954,7 @@ curspd:
 cspd_d:
   RET
 
-; ---- curdmg -> R0 = contact damage for the current enemy. Scratches A0. ----
+; ---- curdmg -> R0 = punch damage for the current enemy. Scratches A0. ----
 curdmg:
   CALL curtype
   LDA A0, #TYPEDMG
@@ -813,15 +1007,22 @@ uc_clamp:
   MOV R0, #0
 uc_write:
   STW R0, [cam]
-  STW R0, [BG0_SX]        ; scroll BG0 to match (street wraps, so it stays seamless)
+  SHR R0, #2
+  STW R0, [BG0_SX]        ; skyline scrolls at a quarter speed (parallax); BG1 follows cam per line
   RET
 
 ; ============================ OAM (sprites) ============================
+; Fighters are 64x64 sprites whose feet sit at (px+8, py+16), the bottom centre of
+; the old 16x16 logic box, so movement and hit tests are unchanged. Depth: sprite
+; priority 3..7 by py band (nearer = higher), shadows at 2 (above BG1, below everyone).
+; OAM order: held pipe, player, NENEM enemies, NPICK pickups, then 1+NENEM shadows.
 buildoam:
   MOV R0, #0
   STW R0, [OAM_INDEX]
+  LDW R0, [p_y]
+  CALL depthpri
+  CALL emitweapon          ; held pipe first so it draws over the hero's hand (off when unarmed)
   CALL emitplayer
-  CALL emitweapon          ; held pipe (off when unarmed)
   MOV R7, #0
 bo_e:
   MOV R3, R7
@@ -843,6 +1044,67 @@ bo_p:
   ADD R7, #1
   CMP R7, #NPICK
   BLT bo_p
+  MOV R0, #2               ; shadows: lowest sprite priority
+  STW R0, [sprpri]
+  LDW R0, [p_x]            ; player's shadow
+  LDW R1, [p_y]
+  CALL emitshadow
+  MOV R7, #0
+bo_s:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #ENEMY
+  ADD A1, R3
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BNE bo_s_on
+  CALL emitoff
+  BRA bo_s_next
+bo_s_on:
+  LDW R0, [A1+#4]
+  LDW R1, [A1+#6]
+  CALL emitshadow
+bo_s_next:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT bo_s
+  RET
+
+; ---- depthpri(R0=py): sprpri = 3 + (py-BANDTOP)/16, clamped to 3..7 ----
+depthpri:
+  SUB R0, #BANDTOP
+  CMP R0, #0
+  BGE dp_pos
+  MOV R0, #0
+dp_pos:
+  SHR R0, #4
+  ADD R0, #3
+  CMP R0, #7
+  BLE dp_set
+  MOV R0, #7
+dp_set:
+  STW R0, [sprpri]
+  RET
+
+; ---- emitshadow(R0=world px, R1=py): 32x32 shadow centred under the feet, culled ----
+emitshadow:
+  LDW R3, [cam]
+  SUB R0, R3
+  SUB R0, #8               ; 32-wide shadow centred on px+8
+  CMP R0, #320
+  BGE es_cull
+  MOV R3, R0
+  ADD R3, #32
+  CMP R3, #0
+  BLT es_cull
+  SUB R1, #12              ; shadow ellipse sits at local y 28 -> feet (py+16)
+  MOV R5, #SHADOW
+  MOV R6, #SZ32
+  OR R6, #PB_SHADOW
+  CALL emittile
+  RET
+es_cull:
+  CALL emitoff
   RET
 
 emitplayer:
@@ -861,16 +1123,15 @@ ep_draw:
   MOV R5, #PL_PUNCH
   BRA ep_attr
 ep_walk:
-  LDW R0, [p_anim]
+  LDW R0, [p_anim]         ; 4-frame walk cycle, 8 ticks a frame
   SHR R0, #3
-  AND R0, #1
-  BEQ ep_fa
-  MOV R5, #PL_WALKB
-  BRA ep_attr
-ep_fa:
-  MOV R5, #PL_WALKA
+  AND R0, #3
+  SHL R0, #6               ; * 64 tiles
+  MOV R5, #PL_WALK
+  ADD R5, R0
 ep_attr:
-  MOV R6, #$11            ; size16 | palette bank 1
+  MOV R6, #SZ64
+  OR R6, #PB_PLAYER
   LDW R0, [p_face]
   AND R0, #1
   BEQ ep_emit
@@ -879,7 +1140,9 @@ ep_emit:
   LDW R0, [p_x]
   LDW R3, [cam]
   SUB R0, R3              ; world x -> screen x
+  SUB R0, #FOFFX
   LDW R1, [p_y]
+  SUB R1, #FOFFY
   CALL emittile
   RET
 
@@ -893,68 +1156,88 @@ ee_on:
   LDW R4, [A1+#4]         ; world ex (kept for the anim key + culling)
   LDW R3, [cam]
   MOV R0, R4
-  SUB R0, R3              ; screen x
+  SUB R0, R3              ; screen x of the logic box
+  SUB R0, #FOFFX          ; -> 64x64 sprite x
   CMP R0, #320            ; off the right edge?
-  BGE ee_cull
+  BLT ee_inr
+  BRA ee_cull
+ee_inr:
   MOV R3, R0
-  ADD R3, #16
-  CMP R3, #0             ; fully off the left edge (screen x <= -16)?
-  BLT ee_cull
-  LDW R1, [A1+#6]         ; ey (no vertical scroll)
+  ADD R3, #64
+  CMP R3, #0             ; fully off the left edge?
+  BGE ee_inl
+  BRA ee_cull
+ee_inl:
+  PUSH R0                ; save screen x across the lookups
+  LDW R0, [A1+#6]
+  CALL depthpri          ; this enemy's depth
   LDW R2, [bossactive]    ; during a boss wave the lone live thug is the boss
   CMP R2, #0
   BNE ee_boss
-  PUSH R0                ; save screen x across the type lookup
   CALL curtype          ; R0 = enemy type
-  LDA A0, #TYPETILE     ; per-type walk-frame-A tile base (distinct silhouettes)
-  ADD A0, R0
-  LDB R5, [A0]
+  MOV R1, R0
+  SHL R1, #1
+  LDA A0, #TYPETILE     ; per-type walk-frame-A tile base
+  ADD A0, R1
+  LDW R5, [A0]
   LDA A0, #TYPEBANK     ; per-type palette bank
   ADD A0, R0
   LDB R0, [A0]
-  MOV R6, #$10          ; size16
+  MOV R6, #SZ64
   OR R6, R0             ; | palette bank  (grunt=2, runner=7, bruiser=8)
+  BRA ee_anim
+ee_boss:
+  MOV R5, #BR_WALK
+  MOV R6, #SZ64
+  OR R6, #PB_BOSS
+ee_anim:
   POP R0                ; restore screen x
-  MOV R2, R4            ; two-frame walk shuffle keyed to world x
-  SHR R2, #2
+  LDW R2, [eidx]        ; attacking? wind-up / punch frames replace the walk cycle
+  LDA A0, #EATK
+  ADD A0, R2
+  LDB R2, [A0]
+  CMP R2, #ATKCD
+  BLE ee_walk
+  CMP R5, #BR_WALK
+  BNE ee_gw
+  MOV R5, #BR_WIND
+  BRA ee_wp
+ee_gw:
+  MOV R5, #GR_WIND
+ee_wp:
+  CMP R2, #ATKSTRIKE
+  BGT ee_tile
+  ADD R5, #64           ; punch frame lives 64 tiles after the wind-up
+  BRA ee_tile
+ee_walk:
+  MOV R2, R4            ; two-frame walk keyed to world x
+  SHR R2, #3
   AND R2, #1
   BEQ ee_tile
-  ADD R5, #4            ; frame B lives 4 tiles after frame A
+  ADD R5, #64           ; frame B lives 64 tiles after frame A
 ee_tile:
-  LDB R2, [A1+#2]        ; staggered -> flash palette bank 4
+  LDB R2, [A1+#2]        ; staggered -> hit-flash bank
   CMP R2, #0
   BEQ ee_face
-  MOV R6, #$14
+  AND R6, #$F0
+  OR R6, #PB_FLASH
 ee_face:
-  LDB R2, [A1+#3]        ; faceRight -> hflip (art faces left)
+  LDB R2, [A1+#3]        ; art faces right; facing left -> hflip
   CMP R2, #0
-  BEQ ee_emit
+  BNE ee_emit
   ADD R6, #$40
 ee_emit:
+  LDW R1, [A1+#6]
+  SUB R1, #FOFFY
   CALL emittile
   RET
 ee_cull:
   CALL emitoff           ; still consume one OAM slot, just disabled
   RET
-ee_boss:
-  MOV R5, #BOSS
-  MOV R6, #$16           ; size16 | palette bank 6
-  LDB R2, [A1+#2]        ; staggered -> white flash (bank 4)
-  CMP R2, #0
-  BEQ ee_bface
-  MOV R6, #$14
-ee_bface:
-  LDB R2, [A1+#3]        ; faceRight -> hflip (boss art faces left)
-  CMP R2, #0
-  BEQ ee_bemit
-  ADD R6, #$40
-ee_bemit:
-  CALL emittile
-  RET
 
 ; ---- emitweapon: the pipe in the player's hand; animates through a swing ----
 ;   not swinging -> held at the side; wind-up -> raised diagonally above the head;
-;   strike (at/after the live frame) -> thrust out front.
+;   strike (at/after the live frame) -> thrust out front. Offsets are from px.
 emitweapon:
   LDW R0, [p_weapon]
   CMP R0, #0
@@ -962,9 +1245,9 @@ emitweapon:
   CALL emitoff
   RET
 ew_on:
-  MOV R5, #WEAPON        ; defaults: held pose
+  MOV R5, #WEAPON        ; defaults: held pose, at the front hand
   MOV R2, #8             ; x offset from the player
-  MOV R4, #0             ; raise (subtracted from py)
+  MOV R4, #14            ; raise (subtracted from py)
   LDW R0, [p_punch]      ; mid-swing?
   CMP R0, #0
   BEQ ew_face
@@ -973,31 +1256,34 @@ ew_on:
   BEQ ew_face            ; a bare-fist swing -> just hold the pipe
   CMP R0, #PUNCHHIT
   BLE ew_strike          ; at/after the live frame -> thrust forward
-  MOV R5, #WEAPON_UP     ; wind-up: raised on the diagonal
+  MOV R5, #WEAPON_UP     ; wind-up: raised on the diagonal, over the shoulder
   MOV R2, #2
-  MOV R4, #10
+  MOV R4, #40
   BRA ew_face
 ew_strike:
-  MOV R5, #WEAPON
-  MOV R2, #18
-  MOV R4, #0
+  MOV R5, #WEAPON        ; strike: thrust out at shoulder height with the fist
+  MOV R2, #26
+  MOV R4, #28
 ew_face:
   LDW R0, [p_x]
   LDW R1, [p_face]
   AND R1, #1
   BEQ ew_right
   SUB R0, R2             ; facing left: mirror the offset + hflip
-  MOV R6, #$55           ; size16 | bank5 | hflip
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
+  OR R6, #$40
   BRA ew_xpos
 ew_right:
   ADD R0, R2
-  MOV R6, #$15           ; size16 | bank5
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
 ew_xpos:
   LDW R3, [cam]
   SUB R0, R3
   LDW R1, [p_y]
-  SUB R1, R4             ; raise up during the wind-up
-  CALL emittile
+  SUB R1, R4             ; up to hand height (raised further in the wind-up)
+  CALL emittile          ; same depth as the player (sprpri still holds it)
   RET
 
 ; ---- emitpickup(A1=slot): a pipe/food item on the ground, camera-offset + culled ----
@@ -1025,15 +1311,20 @@ epk_pos:
   ADD R3, #16
   CMP R3, #0
   BLT epk_cull
+  PUSH R0
+  LDW R0, [A1+#4]
+  CALL depthpri
+  POP R0
   LDW R1, [A1+#4]        ; y
-  MOV R6, #$15           ; size16 | bank5
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
   CALL emittile
   RET
 epk_cull:
   CALL emitoff
   RET
 
-; ---- emittile(R0=px, R1=py, R5=tile, R6=attrLo): one enabled 16x16 descriptor ----
+; ---- emittile(R0=px, R1=py, R5=tile, R6=attrLo): one enabled descriptor at [sprpri] ----
 emittile:
   STB R0, [OAM_DATA]
   MOV R2, R0
@@ -1044,11 +1335,13 @@ emittile:
   SHR R2, #8
   STB R2, [OAM_DATA]
   STB R5, [OAM_DATA]      ; tile lo
-  MOV R2, #0
+  MOV R2, R5
+  SHR R2, #8
   STB R2, [OAM_DATA]      ; tile hi
   STB R6, [OAM_DATA]      ; attr lo
-  MOV R2, #$80
-  STB R2, [OAM_DATA]      ; attr hi: enable
+  LDW R2, [sprpri]
+  OR R2, #$80
+  STB R2, [OAM_DATA]      ; attr hi: enable | priority
   RET
 
 emitoff:
@@ -1083,9 +1376,9 @@ hb_set:
   BLT hb_lp
   RET
 
-; ---- hpcell(R0=col, R2=tile): a HUD cell on BG1 row 0, palette 0 (HP / weapon) ----
+; ---- hpcell(R0=col, R2=tile): a HUD cell on BG1 row 1, palette 0 (HP / weapon) ----
 hpcell:
-  MOV R1, #0
+  MOV R1, #1
   MOV R3, #0
   ; fall through to hudtile
 ; ---- hudtile(R0=col, R1=row, R2=tile, R3=pal): one BG1 (HUD) map cell ----
@@ -1111,7 +1404,7 @@ hudtile:
   STB R7, [VRAM_DATA]
   RET
 
-; ---- drawbosshp: a red bar (row 1) of one cell per boss HP point remaining ----
+; ---- drawbosshp: a red bar (row 2) of one cell per boss HP point remaining ----
 drawbosshp:
   LDA A1, #ENEMY
   LDB R5, [A1+#1]         ; boss current HP
@@ -1126,7 +1419,7 @@ bh_full:
 bh_set:
   MOV R0, R4
   ADD R0, #11            ; bar runs cols 11..28
-  MOV R1, #1             ; HUD row 1
+  MOV R1, #2             ; HUD row 2
   MOV R3, #0
   CALL hudtile
   ADD R4, #1
@@ -1134,17 +1427,17 @@ bh_set:
   BLT bh_lp
   RET
 
-; ---- huddigit(R0=value 0..9, R4=col): one digit on BG1 row 0 in white (palette 3) ----
+; ---- huddigit(R0=value 0..9, R4=col): one digit on BG1 row 1 (font palette 3) ----
 huddigit:
   MOV R2, R0
   ADD R2, #DIGIT
   MOV R0, R4
-  MOV R1, #0
+  MOV R1, #1
   MOV R3, #3
   CALL hudtile
   RET
 
-; ---- hudprint(A1=string, R4=col): draw text on BG1 row 0 in white (palette 3) ----
+; ---- hudprint(A1=string, R4=col): draw text on BG1 row 1 (font palette 3) ----
 hudprint:
 hl_lp:
   LDB R2, [A1]
@@ -1154,7 +1447,7 @@ hl_lp:
   BEQ hl_adv
   ADD R2, #FONT
   MOV R0, R4
-  MOV R1, #0
+  MOV R1, #1
   MOV R3, #3
   CALL hudtile
 hl_adv:
@@ -1175,7 +1468,7 @@ drawlevelhud:
   CALL huddigit
   RET
 
-; ---- clearhp: blank both HUD rows (HP bar + weapon widget + boss bar) ----
+; ---- clearhp: blank the HUD rows 0-2 (HP bar + weapon widget + boss bar) ----
 clearhp:
   MOV R5, #0             ; row
 clh_row:
@@ -1190,7 +1483,7 @@ clh_lp:
   CMP R4, #40
   BLT clh_lp
   ADD R5, #1
-  CMP R5, #2
+  CMP R5, #3
   BLT clh_row
   RET
 
@@ -1230,34 +1523,35 @@ dw_set:
   BLT dw_lp
   RET
 
-; ---- buildstreet: brick wall up top, a curb line, then sidewalk ----
-buildstreet:
-  MOV R5, #2
-bs_y:
-  MOV R4, #0
-bs_x:
-  MOV R0, R4
-  MOV R1, R5
-  MOV R2, #SIDEWALK
-  CMP R5, #8
-  BGT bs_set
-  BEQ bs_curb
-  MOV R2, #BRICK
-  BRA bs_set
-bs_curb:
-  MOV R2, #CURB
-bs_set:
-  MOV R3, #0
-  CALL settile
-  ADD R4, #1
-  CMP R4, #64             ; fill the whole 64-wide map so the wrap stays seamless
-  BLT bs_x
-  ADD R5, #1
-  CMP R5, #28
-  BLT bs_y
+; ---- copymaps: both BG maps from ROM (64x28 cells each). DMA_DST is 16-bit and the
+;      maps live at VRAM $10000/$14000, so they go through the VRAM port. ----
+copymaps:
+  MOV R0, #0
+  STB R0, [VRAM_ADDR]
+  STB R0, [VRAM_ADDR+1]
+  MOV R0, #1
+  STB R0, [VRAM_ADDR+2]     ; $10000: BG0 (skyline)
+  LDA A0, #mapdata
+  CALL cpmap
+  MOV R0, #0
+  STB R0, [VRAM_ADDR]
+  MOV R0, #$40
+  STB R0, [VRAM_ADDR+1]
+  MOV R0, #1
+  STB R0, [VRAM_ADDR+2]     ; $14000: BG1 (street)
+  CALL cpmap               ; A0 carries on into the BG1 half
+  RET
+cpmap:
+  MOV R1, #7168             ; 64 x 28 cells x 4 bytes
+cpm_lp:
+  LDB R2, [A0]
+  STB R2, [VRAM_DATA]
+  INC A0
+  SUB R1, #1
+  BNE cpm_lp
   RET
 
-; ---- settile(R0=tileX, R1=tileY, R2=tile, R3=palette): write one BG0 map cell ----
+; ---- settile(R0=tileX, R1=tileY, R2=tile, R3=palette): write one BG1 map cell ----
 settile:
   MOV R6, R1
   SHL R6, #8              ; tileY*256
@@ -1267,9 +1561,10 @@ settile:
   STB R6, [VRAM_ADDR]
   MOV R7, R6
   SHR R7, #8
+  ADD R7, #$40
   STB R7, [VRAM_ADDR+1]
   MOV R7, #1
-  STB R7, [VRAM_ADDR+2]   ; hi byte: VRAM $10000 + offset
+  STB R7, [VRAM_ADDR+2]   ; VRAM $14000 (BG1) + offset
   STB R2, [VRAM_DATA]     ; cell byte0: tile lo
   MOV R7, R2
   SHR R7, #8
@@ -1283,12 +1578,12 @@ settile:
   STB R7, [VRAM_DATA]     ; byte3 = 0
   RET
 
-; ---- clearmap: blank the visible map to tile 0 ----
-clearmap:
-  MOV R5, #0
-cm_y:
+; ---- clearrows(R5=first row, R6=end row, exclusive): blank 40 visible BG1 cells per row ----
+clearrows:
+  STW R6, [svrem]
+cr_y:
   MOV R4, #0
-cm_x:
+cr_x:
   MOV R0, R4
   MOV R1, R5
   MOV R2, #0
@@ -1296,10 +1591,11 @@ cm_x:
   CALL settile
   ADD R4, #1
   CMP R4, #40
-  BLT cm_x
+  BLT cr_x
   ADD R5, #1
-  CMP R5, #28
-  BLT cm_y
+  LDW R6, [svrem]
+  CMP R5, R6
+  BLT cr_y
   RET
 
 clearoam:
@@ -1375,6 +1671,7 @@ sv_done:
   RET
 
 ; ---- drawnum3(R0=value 0..999, R4=col, R5=row): three white digits on BG0.
+; (on BG1)
 ;      Uses DIVU (dividend R1:R0 -> quotient R0, remainder R1); settile keeps R4/R5. ----
 drawnum3:
   MOV R1, #0               ; high word of the dividend
@@ -1412,132 +1709,104 @@ drawnum3:
 drawtitle:
   CALL menureset
   MOV R0, #0
-  CALL setlevelpal         ; title always wears stage-1 colours
-  CALL clearmap
-  CALL drawtitlebg         ; brick wall + sidewalk backdrop
+  CALL setlevelpal         ; title always wears stage-1 colours (sunset)
+  CALL menubg              ; skyline + street along the bottom
   LDA A1, #sTITLE1
   MOV R4, #17
-  MOV R5, #9
+  MOV R5, #4
   CALL print
   LDA A1, #sTITLE2
   MOV R4, #17
-  MOV R5, #12
+  MOV R5, #6
   CALL print
   LDA A1, #sTAG
   MOV R4, #14
-  MOV R5, #15
+  MOV R5, #9
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #19
+  MOV R5, #11
   CALL print
   LDA A1, #sBEST           ; per-browser high score, restored from save RAM
   MOV R4, #16
-  MOV R5, #24
+  MOV R5, #13
   CALL print
   LDW R0, [best]
   MOV R4, #21
-  MOV R5, #24
+  MOV R5, #13
   CALL drawnum3
   CALL titlesprites        ; hero vs. thugs + boss lineup
   RET
 
-; ---- drawtitlebg: a brick wall band up top and a sidewalk band along the bottom ----
-drawtitlebg:
-  MOV R5, #2              ; brick wall rows 2..6
-tbg_w:
-  MOV R4, #0
-tbg_wx:
-  MOV R0, R4
-  MOV R1, R5
-  MOV R2, #BRICK
-  MOV R3, #0
-  CALL settile
-  ADD R4, #1
-  CMP R4, #40
-  BLT tbg_wx
-  ADD R5, #1
-  CMP R5, #7
-  BLT tbg_w
-  MOV R4, #0             ; curb row 7
-tbg_c:
-  MOV R0, R4
-  MOV R1, #7
-  MOV R2, #CURB
-  MOV R3, #0
-  CALL settile
-  ADD R4, #1
-  CMP R4, #40
-  BLT tbg_c
-  MOV R5, #8            ; sidewalk fills everything below the curb (matches the game)
-tbg_s:
-  MOV R4, #0
-tbg_sx:
-  MOV R0, R4
-  MOV R1, R5
-  MOV R2, #SIDEWALK
-  MOV R3, #0
-  CALL settile
-  ADD R4, #1
-  CMP R4, #40
-  BLT tbg_sx
-  ADD R5, #1
-  CMP R5, #28
-  BLT tbg_s
+; ---- menubg: full maps, then clear the street's upper rows so the skyline shows ----
+menubg:
+  CALL copymaps
+  MOV R5, #2
+  MOV R6, #15              ; keep rows 15+ (sidewalk + road)
+  CALL clearrows
   RET
 
-; ---- titlesprites: a static cast lineup standing on the bottom sidewalk ----
+; ---- fig(R0=x, R1=y, R5=tile, R6=attrLo): a 64x64 lineup sprite at priority 5 ----
+fig:
+  MOV R2, #5
+  STW R2, [sprpri]
+  CALL emittile
+  RET
+
+; ---- titlesprites: a static cast lineup standing on the street ----
 titlesprites:
   MOV R0, #0
   STW R0, [OAM_INDEX]
-  MOV R0, #56            ; hero, facing right
-  MOV R1, #160
-  MOV R5, #PL_WALKA
-  MOV R6, #$11
-  CALL emittile
-  MOV R0, #96            ; a pipe on the ground
-  MOV R1, #172
+  MOV R0, #16            ; hero, facing right
+  MOV R1, #128
+  MOV R5, #PL_WALK
+  MOV R6, #SZ64
+  OR R6, #PB_PLAYER
+  CALL fig
+  MOV R0, #84            ; a pipe on the ground
+  MOV R1, #180
   MOV R5, #WEAPON
-  MOV R6, #$15
-  CALL emittile
-  MOV R0, #128           ; food on the ground
-  MOV R1, #172
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
+  CALL fig
+  MOV R0, #104           ; food on the ground
+  MOV R1, #180
   MOV R5, #FOOD
-  MOV R6, #$15
-  CALL emittile
-  MOV R0, #164           ; grunt (art already faces left, toward the hero)
-  MOV R1, #160
-  MOV R5, #EN_WALKA
-  MOV R6, #$12
-  CALL emittile
-  MOV R0, #192           ; runner (lean, teal)
-  MOV R1, #160
-  MOV R5, #EN2_WALKA
-  MOV R6, #$17
-  CALL emittile
-  MOV R0, #220           ; bruiser (bulky, brown)
-  MOV R1, #158
-  MOV R5, #EN3_WALKA
-  MOV R6, #$18
-  CALL emittile
-  MOV R0, #250           ; the boss
-  MOV R1, #156
-  MOV R5, #BOSS
-  MOV R6, #$16
-  CALL emittile
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
+  CALL fig
+  MOV R0, #126           ; grunt, facing the hero
+  MOV R1, #130
+  MOV R5, #GR_WALK
+  MOV R6, #$72           ; size64 | hflip | bank 2
+  CALL fig
+  MOV R0, #172           ; runner
+  MOV R1, #126
+  MOV R5, #GR_WALK+64
+  MOV R6, #$77
+  CALL fig
+  MOV R0, #214           ; bruiser
+  MOV R1, #130
+  MOV R5, #BR_WALK
+  MOV R6, #$78
+  CALL fig
+  MOV R0, #256           ; the boss
+  MOV R1, #126
+  MOV R5, #BR_WALK+64
+  MOV R6, #$76
+  CALL fig
   RET
 
 drawwin:
   CALL menureset
-  CALL clearmap
-  CALL drawtitlebg
+  CALL menubg
   LDA A1, #sWIN
   MOV R4, #16
-  MOV R5, #9
+  MOV R5, #5
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #19
+  MOV R5, #9
   CALL print
   CALL winsprites
   RET
@@ -1546,52 +1815,53 @@ drawwin:
 winsprites:
   MOV R0, #0
   STW R0, [OAM_INDEX]
-  MOV R0, #60            ; hero, on the left, standing
-  MOV R1, #158
-  MOV R5, #PL_WALKA
-  MOV R6, #$11
-  CALL emittile
-  MOV R0, #70            ; pipe raised in victory
-  MOV R1, #148
+  MOV R0, #76            ; pipe raised in victory (index 0: over the hero)
+  MOV R1, #118
   MOV R5, #WEAPON_UP
-  MOV R6, #$15
-  CALL emittile
-  MOV R0, #140           ; beaten thug (vflip = flat on its back)
-  MOV R1, #176
-  MOV R5, #EN_WALKA
-  MOV R6, #$92
-  CALL emittile
-  MOV R0, #178
-  MOV R1, #176
-  MOV R5, #EN_WALKB
-  MOV R6, #$92
-  CALL emittile
-  MOV R0, #216           ; beaten boss
-  MOV R1, #174
-  MOV R5, #BOSS
-  MOV R6, #$96
-  CALL emittile
+  MOV R6, #SZ16
+  OR R6, #PB_PICK
+  CALL fig
+  MOV R0, #40            ; hero, standing
+  MOV R1, #128
+  MOV R5, #PL_WALK
+  MOV R6, #SZ64
+  OR R6, #PB_PLAYER
+  CALL fig
+  MOV R0, #120           ; beaten thugs
+  MOV R1, #136
+  MOV R5, #GR_DOWN
+  MOV R6, #$32
+  CALL fig
+  MOV R0, #170
+  MOV R1, #150
+  MOV R5, #GR_DOWN
+  MOV R6, #$37
+  CALL fig
+  MOV R0, #236           ; beaten boss
+  MOV R1, #140
+  MOV R5, #BR_DOWN
+  MOV R6, #$36
+  CALL fig
   RET
 
 drawover:
   CALL menureset
-  CALL clearmap
-  CALL drawtitlebg
+  CALL menubg
   LDA A1, #sOVER
   MOV R4, #15
-  MOV R5, #9
+  MOV R5, #5
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
-  MOV R5, #19
+  MOV R5, #9
   CALL print
   LDA A1, #sBEST           ; show the (possibly just-updated) best-kills record
   MOV R4, #16
-  MOV R5, #24
+  MOV R5, #11
   CALL print
   LDW R0, [best]
   MOV R4, #21
-  MOV R5, #24
+  MOV R5, #11
   CALL drawnum3
   CALL oversprites
   RET
@@ -1600,48 +1870,52 @@ drawover:
 oversprites:
   MOV R0, #0
   STW R0, [OAM_INDEX]
-  MOV R0, #150           ; downed hero (vflip), centre
-  MOV R1, #176
-  MOV R5, #PL_WALKA
-  MOV R6, #$91
-  CALL emittile
-  MOV R0, #100           ; thug standing over him, facing right
-  MOV R1, #158
-  MOV R5, #EN_WALKA
-  MOV R6, #$52
-  CALL emittile
-  MOV R0, #208           ; thug on the right
-  MOV R1, #158
-  MOV R5, #EN_WALKB
-  MOV R6, #$12
-  CALL emittile
-  MOV R0, #240           ; the boss looms
-  MOV R1, #154
-  MOV R5, #BOSS
-  MOV R6, #$16
-  CALL emittile
+  MOV R0, #130           ; downed hero, centre
+  MOV R1, #144
+  MOV R5, #PL_DOWN
+  MOV R6, #SZ64
+  OR R6, #PB_PLAYER
+  CALL fig
+  MOV R0, #70            ; thug standing over him, facing right
+  MOV R1, #128
+  MOV R5, #GR_WALK
+  MOV R6, #$32
+  CALL fig
+  MOV R0, #196           ; thug on the right, facing left
+  MOV R1, #130
+  MOV R5, #GR_WALK+64
+  MOV R6, #$77
+  CALL fig
+  MOV R0, #248           ; the boss looms
+  MOV R1, #124
+  MOV R5, #BR_WALK
+  MOV R6, #$76
+  CALL fig
   RET
 
-; ---- drawinter: "STAGE n / GET READY" shown between stages ----
+; ---- drawinter: "STAGE n / GET READY" over the next stage's sky ----
 drawinter:
   CALL menureset
-  CALL clearmap
+  LDW R0, [level]          ; preview the upcoming stage's colours
+  ADD R0, #1
+  CALL setlevelpal
+  CALL menubg
   LDA A1, #sSTAGE
   MOV R4, #16
-  MOV R5, #10
+  MOV R5, #6
   CALL print
   LDW R0, [level]          ; upcoming stage (level is the one just cleared), 1-based
   ADD R0, #2
   MOV R4, #22
-  MOV R5, #10
+  MOV R5, #6
   CALL printdigit
   LDA A1, #sREADY
   MOV R4, #15
-  MOV R5, #14
+  MOV R5, #9
   CALL print
   RET
 
-; ---- printdigit(R0=value, R4=col, R5=row): one digit on BG0 in white ----
+; ---- printdigit(R0=value, R4=col, R5=row): one digit on BG1 in the font palette ----
 printdigit:
   MOV R2, R0
   ADD R2, #DIGIT
@@ -1649,6 +1923,380 @@ printdigit:
   MOV R1, R5
   MOV R3, #3
   CALL settile
+  RET
+
+; ============================ character creator ============================
+; The player's bank layout is fixed (outline, skin x3, hair x2, top x3, legs x3,
+; shoes x2, trim), so every body takes every colour pick. A body is 6 frames DMA'd
+; over PL_WALK..PL_DOWN; colours are ramps from charpal copied into the bank.
+
+; ---- applychar: picks -> body tiles in VRAM + the player palette bank ----
+applychar:
+  LDB R0, [c_body]
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0               ; * 3 (DA entries)
+  LDA A0, #BODYTAB
+  ADD A0, R1
+  LDADDR A0, [A0]
+  MOV R0, #PL_DST
+  STW R0, [DMA_DST]
+  MOV R0, #PL_BYTES
+  STW R0, [DMA_LEN]
+  MOV R0, #0
+  STB R0, [DMA_MODE]       ; VRAM
+  CALL dmago
+  LDA A1, #CHARPAL
+  LDA A0, #charpal+CP_OL
+  MOV R2, #1
+  CALL cpwords             ; outline
+  LDB R0, [c_body+1]
+  MOV R1, #6
+  MULU R0, R1
+  LDA A0, #charpal
+  ADD A0, R0
+  MOV R2, #3
+  CALL cpwords             ; skin ramp
+  LDB R0, [c_body+2]
+  MOV R1, #4
+  MULU R0, R1
+  LDA A0, #charpal+CP_HAIR
+  ADD A0, R0
+  MOV R2, #2
+  CALL cpwords             ; hair ramp
+  LDB R0, [c_body+3]
+  MOV R1, #6
+  MULU R0, R1
+  LDA A0, #charpal+CP_TOP
+  ADD A0, R0
+  MOV R2, #3
+  CALL cpwords             ; top ramp
+  LDB R0, [c_body+4]
+  MOV R1, #6
+  MULU R0, R1
+  LDA A0, #charpal+CP_LEGS
+  ADD A0, R0
+  MOV R2, #3
+  CALL cpwords             ; trousers ramp
+  LDB R0, [c_body+5]
+  MOV R1, #4
+  MULU R0, R1
+  LDA A0, #charpal+CP_SHOES
+  ADD A0, R0
+  MOV R2, #2
+  CALL cpwords             ; shoes ramp
+  LDA A0, #charpal+CP_TRIM
+  MOV R2, #1
+  CALL cpwords             ; trim
+  LDA A0, #CHARPAL
+  MOV R0, #PB9PAL          ; bank 9 entries 1..15
+  MOV R1, #30
+  CALL dmapal
+  RET
+
+; ---- cpwords(A0=src, A1=dst, R2=count): copy words; A1 ends past the last ----
+cpwords:
+  LDW R0, [A0]
+  STW R0, [A1]
+  ADD A0, #2
+  ADD A1, #2
+  SUB R2, #1
+  BNE cpwords
+  RET
+
+; ---- loadchar: picks from save RAM (any out-of-range pick -> 0), then apply ----
+loadchar:
+  LDA A0, #SV_CHAR
+  LDA A1, #c_body
+  LDA A2, #CHCOUNT
+  MOV R2, #CROWS
+  LDW R0, [SV_MAG]
+  MOV R1, #SVMAGIC
+  CMP R0, R1
+  BEQ lc_lp
+  LDA A0, #CHZERO          ; no save yet: the defaults
+lc_lp:
+  LDB R0, [A0]
+  LDB R1, [A2]
+  CMP R0, R1
+  BLT lc_ok
+  MOV R0, #0
+lc_ok:
+  STB R0, [A1]
+  INC A0
+  INC A1
+  INC A2
+  SUB R2, #1
+  BNE lc_lp
+  CALL applychar
+  RET
+
+; ---- savechar: write the picks + a coherent record, then commit ----
+savechar:
+  LDA A0, #c_body
+  LDA A1, #SV_CHAR
+  MOV R2, #CROWS
+sc_lp:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sc_lp
+  LDW R0, [best]
+  STW R0, [SV_BEST]
+  MOV R1, #SVMAGIC
+  STW R1, [SV_MAG]
+  MOV R1, #1
+  STB R1, [SAVECOMMIT]
+  RET
+
+; ---- drawcreator: sky + road backdrop, labels, arrows, live colour swatches ----
+drawcreator:
+  CALL menureset
+  MOV R0, #0
+  CALL setlevelpal
+  CALL copymaps
+  MOV R5, #2
+  MOV R6, #20              ; keep the curb and road (rows 20+)
+  CALL clearrows
+  CALL clearoam
+  LDA A1, #sCREATE
+  MOV R4, #11
+  MOV R5, #3
+  CALL print
+  LDA A1, #sLABELS         ; six labels, END-separated
+  MOV R5, #CROW0
+dc_lab:
+  MOV R4, #CLAB
+  CALL print
+  INC A1                   ; past this label's END
+  ADD R5, #2
+  CMP R5, #CROWEND
+  BLT dc_lab
+  MOV R5, #CROW0
+dc_arr:
+  MOV R0, #CARL
+  MOV R1, R5
+  MOV R2, #ARROWL
+  MOV R3, #PB_FONT
+  CALL settile
+  MOV R0, #CARR
+  MOV R1, R5
+  MOV R2, #ARROWR
+  MOV R3, #PB_FONT
+  CALL settile
+  ADD R5, #2
+  CMP R5, #CROWEND
+  BLT dc_arr
+  LDA A1, #SWTAB           ; swatches: (first colour, count) per colour row
+  MOV R5, #CROW0+2
+dc_sw:
+  LDB R2, [A1]
+  ADD R2, #SOLID-1
+  LDB R4, [A1+#1]
+  INC A1
+  INC A1
+  MOV R0, #CARL+2
+dc_swc:
+  PUSH R0
+  MOV R1, R5
+  MOV R3, #PB_PLAYER       ; drawn in the player's own bank, so they track the picks
+  PUSH R2
+  CALL settile
+  POP R2
+  POP R0
+  ADD R0, #1
+  ADD R2, #1
+  SUB R4, #1
+  BNE dc_swc
+  ADD R5, #2
+  CMP R5, #CROWEND
+  BLT dc_sw
+  CALL drawbodyname
+  LDA A1, #sSTART
+  MOV R4, #15
+  MOV R5, #25
+  CALL print
+  MOV R0, #0
+  STW R0, [c_sel]
+  STW R0, [p_anim]
+  STW R0, [p_punch]
+  MOV R0, #5
+  STW R0, [state]
+  RET
+
+; ---- drawbodyname: blank the body value cells, print the current body's name ----
+drawbodyname:
+  MOV R4, #CARL+1
+dbn_clr:
+  MOV R0, R4
+  MOV R1, #CROW0
+  MOV R2, #0
+  MOV R3, #0
+  CALL settile
+  ADD R4, #1
+  CMP R4, #CARR
+  BLT dbn_clr
+  LDB R0, [c_body]
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #NAMETAB
+  ADD A0, R1
+  LDADDR A1, [A0]
+  MOV R4, #CARL+2
+  MOV R5, #CROW0
+  CALL print
+  RET
+
+; ---- creatorframe: Up/Down row, Left/Right value, A test punch, Start fights ----
+creatorframe:
+  LDW R0, [in_now]
+  LDW R1, [in_prev]
+  NOT R1
+  AND R1, R0
+  STW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #START
+  BEQ cf_up
+  CALL savechar
+  MOV R0, #120
+  CALL sfxblip
+  CALL newgame
+  RET
+cf_up:
+  LDW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #UP
+  BEQ cf_dn
+  LDW R0, [c_sel]
+  CMP R0, #0
+  BNE cf_up1
+  MOV R0, #CROWS
+cf_up1:
+  SUB R0, #1
+  STW R0, [c_sel]
+  MOV R0, #200
+  CALL sfxblip
+cf_dn:
+  LDW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #DOWN
+  BEQ cf_lr
+  LDW R0, [c_sel]
+  ADD R0, #1
+  CMP R0, #CROWS
+  BLT cf_dn1
+  MOV R0, #0
+cf_dn1:
+  STW R0, [c_sel]
+  MOV R0, #200
+  CALL sfxblip
+cf_lr:
+  LDW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #RIGHT
+  BEQ cf_left
+  MOV R2, #1
+  CALL cstep
+cf_left:
+  LDW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #LEFT
+  BEQ cf_a
+  MOV R2, #0
+  CALL cstep
+cf_a:
+  LDW R1, [c_edge]
+  MOV R0, R1
+  AND R0, #ABTN
+  BEQ cf_anim
+  MOV R0, #PUNCHT
+  STW R0, [p_punch]
+  MOV R0, #180
+  CALL sfxblip
+cf_anim:
+  LDW R0, [p_anim]
+  ADD R0, #1
+  STW R0, [p_anim]
+  LDW R0, [p_punch]
+  CMP R0, #0
+  BEQ cf_oam
+  SUB R0, #1
+  STW R0, [p_punch]
+cf_oam:
+  MOV R0, #0
+  STW R0, [OAM_INDEX]
+  LDW R1, [c_sel]          ; cursor: a font arrow left of the selected label
+  SHL R1, #4
+  ADD R1, #CROWPY
+  MOV R0, #CURX
+  LDW R2, [p_anim]
+  AND R2, #16
+  BEQ cf_cur
+  ADD R0, #2               ; nudge back and forth
+cf_cur:
+  MOV R5, #ARROWR
+  MOV R6, #PB_FONT         ; 8x8
+  CALL fig
+  LDW R5, [p_punch]        ; the fighter, walking on the spot
+  CMP R5, #0
+  BEQ cf_walk
+  MOV R5, #PL_PUNCH
+  BRA cf_fig
+cf_walk:
+  LDW R0, [p_anim]
+  SHR R0, #3
+  AND R0, #3
+  SHL R0, #6
+  MOV R5, #PL_WALK
+  ADD R5, R0
+cf_fig:
+  MOV R0, #PVX
+  MOV R1, #PVY
+  MOV R6, #SZ64
+  OR R6, #PB_PLAYER
+  CALL fig
+  MOV R0, #2
+  STW R0, [sprpri]
+  MOV R0, #PVX+FOFFX
+  MOV R1, #PVY+FOFFY
+  CALL emitshadow
+  RET
+
+; ---- cstep(R2=1 next, 0 previous): change the selected row's pick, with wrap ----
+cstep:
+  LDW R3, [c_sel]
+  LDA A0, #c_body
+  ADD A0, R3
+  LDA A1, #CHCOUNT
+  ADD A1, R3
+  LDB R0, [A0]
+  LDB R1, [A1]
+  CMP R2, #0
+  BEQ cs_prev
+  ADD R0, #1
+  CMP R0, R1
+  BLT cs_set
+  MOV R0, #0
+  BRA cs_set
+cs_prev:
+  CMP R0, #0
+  BNE cs_dec
+  MOV R0, R1
+cs_dec:
+  SUB R0, #1
+cs_set:
+  STB R0, [A0]
+  CALL applychar
+  MOV R0, #160
+  CALL sfxblip
+  LDW R3, [c_sel]
+  CMP R3, #0
+  BNE cs_done
+  CALL drawbodyname
+cs_done:
   RET
 
 ; ============================ new game ============================
@@ -1667,8 +2315,7 @@ newgame:
 loadlevel:
   STW R0, [level]
   CALL setlevelpal         ; (R0 still = level)
-  CALL clearmap
-  CALL buildstreet
+  CALL copymaps            ; skyline + street
   MOV R0, #0
   STW R0, [cam]
   STW R0, [cammax]
@@ -1699,24 +2346,69 @@ loadlevel:
   CALL addpickup
   RET
 
-; ---- setlevelpal(R0=level): per-stage brick / sidewalk / enemy-body colours ----
+; ---- setlevelpal(R0=level): this stage's sky gradient -> SKYTAB (read by hblank),
+;      and its recoloured banks: 1 (sky/skyline), 2 (grunt), 10 (brick). ----
 setlevelpal:
-  MOV R3, R0
-  SHL R3, #3              ; level * 8 bytes (4 words each)
-  LDA A0, #levelpal
-  ADD A0, R3
-  MOV R0, #1             ; BG bank 0 entries 1,2,3
-  STB R0, [PAL_INDEX]
-  LDW R0, [A0]
-  STW R0, [PAL_DATA]     ; 1 brick dark
-  LDW R0, [A0+#2]
-  STW R0, [PAL_DATA]     ; 2 brick light
-  LDW R0, [A0+#4]
-  STW R0, [PAL_DATA]     ; 3 sidewalk
-  MOV R0, #33           ; enemy bank 2 entry 1
-  STB R0, [PAL_INDEX]
-  LDW R0, [A0+#6]
-  STW R0, [PAL_DATA]     ; enemy body colour
+  MOV R1, #LEVELREC
+  MULU R0, R1              ; R0 = level * record size
+  LDA A0, #levels
+  ADD A0, R0
+  LDA A1, #SKYTAB
+  MOV R1, #224
+slp_sky:
+  LDW R2, [A0]
+  STW R2, [A1]
+  ADD A0, #2
+  ADD A1, #2
+  SUB R1, #1
+  BNE slp_sky
+  MOV R0, #34              ; bank 1 entries 1..13 (palette byte offset 17*2)
+  MOV R1, #26
+  CALL dmapal
+  ADD A0, #26
+  MOV R0, #66              ; bank 2 entries 1..15
+  MOV R1, #30
+  CALL dmapal
+  ADD A0, #30
+  MOV R0, #322             ; bank 10 entries 1..15
+  MOV R1, #30
+  CALL dmapal
+  RET
+
+; ---- dmapal(A0=src, R0=palette byte offset, R1=length): DMA into the palette ----
+dmapal:
+  STW R0, [DMA_DST]
+  STW R1, [DMA_LEN]
+  MOV R0, #2
+  STB R0, [DMA_MODE]
+  ; fall through to dmago
+; ---- dmago(A0=src): store the 24-bit source and start the transfer ----
+dmago:
+  PUSHA A0                 ; no store-from-An: spill it, read back as two words
+  POP R0                   ; source bits 0-15
+  POP R1                   ; source bits 16-23 (+ the slot's zero pad byte)
+  STW R0, [DMA_SRC]
+  STB R1, [DMA_SRC+2]
+  MOV R0, #1
+  STB R0, [DMA_CTRL]
+  RET
+
+; ---- loadart: every tile into VRAM (one DMA), the full palette, stage-1 sky ----
+loadart:
+  LDA A0, #tiledata
+  MOV R0, #0
+  STW R0, [DMA_DST]
+  MOV R0, #tiledataend-tiledata
+  STW R0, [DMA_LEN]
+  MOV R0, #0
+  STB R0, [DMA_MODE]       ; VRAM
+  CALL dmago
+  LDA A0, #paldata
+  MOV R0, #0
+  MOV R1, #512
+  CALL dmapal              ; all 256 entries
+  MOV R0, #0
+  CALL setlevelpal
   RET
 
 ; ---- addpickup(R0=type, R1=x, R2=y): drop into the first free pickup slot ----
@@ -1892,6 +2584,10 @@ sw_lp:
   LDA A2, #ETYPE         ; ETYPE[R7] = type
   ADD A2, R7
   STB R0, [A2]
+  LDA A2, #EATK          ; EATK[R7] = 0 (not mid-attack)
+  ADD A2, R7
+  MOV R1, #0
+  STB R1, [A2]
   LDA A2, #TYPEHP        ; hp = TYPEHP[type]
   ADD A2, R0
   LDB R1, [A2]
@@ -1914,14 +2610,14 @@ sw_lp:
   ADD R2, R3           ; i*48
   ADD R0, R2
   STW R0, [A1+#4]
-  MOV R0, R7            ; y = 96 + (i&3)*24  (four rows down the band)
+  MOV R0, R7            ; y = BANDTOP + (i&3)*24  (four rows down the band)
   AND R0, #3
   MOV R2, R0
   SHL R2, #4           ; row*16
   SHL R0, #3           ; row*8
   ADD R2, R0           ; row*24
   MOV R0, R2
-  ADD R0, #96
+  ADD R0, #BANDTOP
   STW R0, [A1+#6]
   BRA sw_next
 sw_dead:
@@ -1946,9 +2642,11 @@ spawnboss:
   STB R0, [A1+#0]
   MOV R0, #BOSSHP
   STB R0, [A1+#1]
-  LDA A2, #ETYPE          ; boss uses the grunt profile (steady speed, 1 contact dmg)
+  LDA A2, #ETYPE          ; boss uses the grunt profile (steady speed, 1 punch dmg)
   MOV R0, #GRUNT
   STB R0, [A2]
+  MOV R0, #0
+  STB R0, [EATK]          ; the boss sits in slot 0
   MOV R0, #0
   STB R0, [A1+#2]
   STB R0, [A1+#3]
@@ -2044,157 +2742,18 @@ mt_adv:
   RET
 
 ; ============================ palettes ============================
-setpal:
-  MOV R0, #0             ; bank 0: background
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]     ; 0 black
-  MOV R0, #$10D6
-  STW R0, [PAL_DATA]     ; 1 brick dark
-  MOV R0, #$215B
-  STW R0, [PAL_DATA]     ; 2 brick light
-  MOV R0, #$5294
-  STW R0, [PAL_DATA]     ; 3 sidewalk
-  MOV R0, #$1CE7
-  STW R0, [PAL_DATA]     ; 4 road
-  MOV R0, #$131C
-  STW R0, [PAL_DATA]     ; 5 curb
-  MOV R0, #$1B84
-  STW R0, [PAL_DATA]     ; 6 hp green
-  MOV R0, #$2529
-  STW R0, [PAL_DATA]     ; 7 hp empty
-  MOV R0, #$318C
-  STW R0, [PAL_DATA]     ; 8 mortar
-  MOV R0, #16            ; bank 1: player
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$42DF
-  STW R0, [PAL_DATA]     ; 1 skin
-  MOV R0, #$7104
-  STW R0, [PAL_DATA]     ; 2 shirt
-  MOV R0, #$3862
-  STW R0, [PAL_DATA]     ; 3 pants
-  MOV R0, #$0842
-  STW R0, [PAL_DATA]     ; 4 outline
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 5 white
-  MOV R0, #32            ; bank 2: enemy
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$109E
-  STW R0, [PAL_DATA]     ; 1 red
-  MOV R0, #$084E
-  STW R0, [PAL_DATA]     ; 2 dark red
-  MOV R0, #$3A5C
-  STW R0, [PAL_DATA]     ; 3 skin
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 4 white
-  MOV R0, #48            ; bank 3: font
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 1 white
-  MOV R0, #64            ; bank 4: enemy hit-flash (all white)
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]
-  MOV R0, #80            ; bank 5: pickups (pipe + food)
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$5AD6
-  STW R0, [PAL_DATA]     ; 1 pipe light grey
-  MOV R0, #$294A
-  STW R0, [PAL_DATA]     ; 2 pipe dark grey
-  MOV R0, #$1152
-  STW R0, [PAL_DATA]     ; 3 meat brown
-  MOV R0, #$4B5C
-  STW R0, [PAL_DATA]     ; 4 bone / tan
-  MOV R0, #$139E
-  STW R0, [PAL_DATA]     ; 5 yellow
-  MOV R0, #96            ; bank 6: boss
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$6C1C
-  STW R0, [PAL_DATA]     ; 1 boss body (purple)
-  MOV R0, #$2008
-  STW R0, [PAL_DATA]     ; 2 dark
-  MOV R0, #$3A5C
-  STW R0, [PAL_DATA]     ; 3 skin
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 4 white (eyes / flash)
-  MOV R0, #112           ; bank 7: runner (fast, fragile) — teal jacket
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$5F20
-  STW R0, [PAL_DATA]     ; 1 body (bright teal)
-  MOV R0, #$2980
-  STW R0, [PAL_DATA]     ; 2 dark teal
-  MOV R0, #$3A5C
-  STW R0, [PAL_DATA]     ; 3 skin
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 4 white
-  MOV R0, #128           ; bank 8: bruiser (slow, tanky) — heavy brown
-  STB R0, [PAL_INDEX]
-  MOV R0, #$0000
-  STW R0, [PAL_DATA]
-  MOV R0, #$1952
-  STW R0, [PAL_DATA]     ; 1 body (brown)
-  MOV R0, #$0A0C
-  STW R0, [PAL_DATA]     ; 2 dark brown
-  MOV R0, #$3A5C
-  STW R0, [PAL_DATA]     ; 3 skin
-  MOV R0, #$7FFF
-  STW R0, [PAL_DATA]     ; 4 white
-  RET
-
-; ---- copy the whole tile sheet from ROM into VRAM tile region (offset 0) ----
-copysheet:
-  MOV R0, #0
-  STB R0, [VRAM_ADDR]
-  STB R0, [VRAM_ADDR+1]
-  STB R0, [VRAM_ADDR+2]
-  LDA A0, #sheet
-  MOV R1, #sheetend-sheet
-cs_lp:
-  LDB R2, [A0]
-  STB R2, [VRAM_DATA]
-  INC A0
-  SUB R1, #1
-  BNE cs_lp
-  RET
-
 ; ============================ data ============================
-; per-stage palette: brick dark, brick light, sidewalk, enemy body (RGB555)
-levelpal:
-  DW $10D6, $215B, $5294, $109E   ; stage 1: red brick, red thugs
-  DW $3042, $40C4, $418C, $609C   ; stage 2: night blue, magenta thugs
-  DW $1142, $1A04, $3254, $0A1E   ; stage 3: industrial green, orange thugs
-
 ; ---- enemy type stats, indexed by type (GRUNT, RUNNER, BRUISER) ----
 TYPEHP:                          ; hit points
   DB 3, 2, 6
 TYPESPD:                         ; chase speed (px/frame; bruiser also rests alt frames)
   DB 1, 2, 1
-TYPEDMG:                         ; contact damage
+TYPEDMG:                         ; punch damage
   DB 1, 1, 2
 TYPEBANK:                        ; sprite palette bank
   DB 2, 7, 8
-TYPETILE:                        ; walk-frame-A tile base (distinct silhouette per type)
-  DB EN_WALKA, EN2_WALKA, EN3_WALKA
+TYPETILE:                        ; walk-frame-A tile base (grunt + runner share a rig, recoloured)
+  DW GR_WALK, GR_WALK, BR_WALK
 
 ; ---- wave descriptors: NLEVELS*NORMW rows, NENEM type bytes each (NONE = empty).
 ;      Row index = level*NORMW + wave. Difficulty ramps across the stages. ----
@@ -2211,6 +2770,44 @@ wavedef:
   DB GRUNT,   GRUNT,   BRUISER, BRUISER, NONE,    NONE,    NONE,    NONE
   DB RUNNER,  RUNNER,  RUNNER,  GRUNT,   NONE,    NONE,    NONE,    NONE
   DB GRUNT,   RUNNER,  BRUISER, GRUNT,   RUNNER,  BRUISER, NONE,    NONE
+
+; ---- character creator tables ----
+CHCOUNT:                         ; choices per row: bodies, skins, hair, tops, trousers, shoes
+  DB NBODY, 6, 8, 10, 10, 8
+CHZERO:                          ; default picks (no save yet)
+  DB 0, 0, 0, 0, 0, 0
+SWTAB:                           ; per colour row: first bank colour, swatch width
+  DB 2, 3, 5, 2, 7, 3, 10, 3, 13, 2
+BODYTAB:                         ; ROM address of each body's 6 frames
+  DA bodies, bodies+PL_BYTES, bodies+24576, bodies+36864
+  DA bodies+49152, bodies+61440, bodies+73728, bodies+86016
+NAMETAB:                         ; body names (keep in step with BODIES in the art tool)
+  DA nRIO, nMARA, nTANK, nKENJI, nZED, nFOX, nLIN, nWOLF
+nRIO:
+  DB R, I, O, END
+nMARA:
+  DB M, A, R, A, END
+nTANK:
+  DB T, A, N, K, END
+nKENJI:
+  DB K, E, N, J, I, END
+nZED:
+  DB Z, E, D, END
+nFOX:
+  DB F, O, X, END
+nLIN:
+  DB L, I, N, END
+nWOLF:
+  DB W, O, L, F, END
+sCREATE:
+  DB C, R, E, A, T, E, SPC, Y, O, U, R, SPC, F, I, G, H, T, E, R, END
+sLABELS:
+  DB B, O, D, Y, END
+  DB S, K, I, N, END
+  DB H, A, I, R, END
+  DB T, O, P, END
+  DB L, E, G, S, END
+  DB S, H, O, E, S, END
 
 ; ---- song: SQ1 periods, 0 = rest, $FFFF = loop. A driving minor-key riff. ----
 song:
@@ -2237,6 +2834,17 @@ sOVER:
 sBEST:
   DB B, E, S, T, SPC, END
 
-sheet:
-  INCBIN "assets.bin"
-sheetend:
+; ---- art (examples/streetbrawl/gen_art.js) ----
+levels:                          ; NLEVELS x LEVELREC: 224-word sky, banks 1 (13 words), 2 + 10 (15 each)
+  INCBIN "levels.bin"
+paldata:                         ; 256 RGB555 entries
+  INCBIN "pal.bin"
+mapdata:                         ; BG0 then BG1: 64x28 cells x 4 bytes
+  INCBIN "maps.bin"
+charpal:                         ; creator colour ramps (see CP_* offsets)
+  INCBIN "charpal.bin"
+bodies:                          ; NBODY x PL_BYTES: the selectable bodies
+  INCBIN "bodies.bin"
+tiledata:                        ; VRAM tiles from index 0
+  INCBIN "tiles.bin"
+tiledataend:

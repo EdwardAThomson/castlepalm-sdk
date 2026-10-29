@@ -143,3 +143,41 @@ framebuffer pixels are checked against the source colours. A 16x16 RGBA quadrant
 (red / green / blue / white, with a transparent corner) renders back as exactly
 those colours, and the transparent pixel shows the backdrop. The same flow works
 from the command line against an on-disk PNG and `build-cart.js`.
+
+## 5. Procedural art: Oathbound's 16-bit pass
+
+Oathbound's graphics are not drawn in PNGs. `tools/oathbound-art.js` paints them from
+code (shaded rigs for the characters, layered scenery for the backdrop) and writes
+`carts/oathbound.art.bin`, which the cart INCBINs at `artbin` and DMAs into VRAM at
+boot. The tool also rewrites the `ART-EQU` and `ART-RUNS` blocks in
+`carts/oathbound.asm` with every tile index, section offset and VRAM run, so the cart
+and the binary never drift apart.
+
+```
+node tools/oathbound-art.js                    # art.bin + EQUs
+node tools/oathbound-art.js --png /tmp/oath    # plus sprite-sheet + backdrop previews
+node tools/build-cart.js carts/oathbound.asm carts/oathbound.cpc OATHBOUND
+node tools/oathrender.js carts/oathbound.cpc png 120 /tmp/oath/screen.png   # check in the cart
+```
+
+What it encodes:
+
+- **Level picture vs collision.** The tool reads `levelBase` from the cart and
+  auto-tiles it (grass, earth, mossy masonry, stone ledges, rope bridges, spikes,
+  coins), plus decorations that never collide. The cart still streams collision from
+  `levelBase`; only the BG0 picture comes from the visual map (`ART_VMAP0`).
+- **One bank per tile.** Where two materials meet inside one 8x8 tile, the minority
+  pixels are re-coloured to the nearest colour of the tile's bank. Zone accents (lit
+  windows, flowers) are never used as stand-ins, because they change colour per zone.
+- **Zone moods.** Scenery banks 0..5 are colour-graded per zone (morning, torchlit
+  night, overcast, violet dusk), and each zone has a 224-line sky table that the
+  hblank handler writes into palette entry 0 every scanline.
+- **Three backdrops.** BG1 has an outdoor loop (zones 1 and 4), a torchlit dungeon
+  (zone 2) and a great hall (zone 3). The indoor ones bring their own colours for
+  banks 1..2, and `loadzonepal` copies the zone's map into BG1. They repeat every
+  128 px and mirror inside each bay, so most tiles fold onto their h-flipped twins.
+  The dungeon torches flicker by palette cycling (`ART_FLICK`, in `tickpalcycle`).
+- **VRAM budget.** Tile 0 is blank and the front end owns its text glyphs (the boxed
+  letters and digits and their pixel-doubled copies). The tool allocates art around
+  them, so the art lands in a few contiguous runs, which the boot DMAs one by one
+  from `artRuns`. It fails loudly if the art does not fit in 2048 tiles.
