@@ -12,11 +12,14 @@ const root = path.join(__dirname, '..')
 const { buildCart } = require(path.join(root, 'cpu', 'cart.js'))
 const examplesDir = path.join(root, 'examples')
 const embedCart = (file, title, hasSave = false) => Buffer.from(
-  buildCart(fs.readFileSync(path.join(examplesDir, file), 'utf8'), { title, hasSave, readBinary: rel => fs.readFileSync(path.resolve(examplesDir, rel)) })
+  buildCart(fs.readFileSync(path.join(examplesDir, file), 'utf8'), { title, hasSave, readBinary: rel => fs.readFileSync(path.resolve(path.dirname(path.join(examplesDir, file)), rel)) })
 ).toString('base64')
 const pongB64 = embedCart('pong.asm', 'PONG')
 const snakeB64 = embedCart('snake.asm', 'SNAKE', true)   // Snake persists a high score
-const palmblastB64 = embedCart('palmblast.asm', 'PalmBlast')
+const palmblastB64 = embedCart('palmblast/palmblast.asm', 'PalmBlast')
+const streetbrawlB64 = embedCart('streetbrawl/streetbrawl.asm', 'BRAWL', true)   // keeps the character-creator pick
+const siegestoneB64 = embedCart('siegestone/siegestone.asm', 'SIEGESTONE')
+const swornrivalsB64 = embedCart('swornrivals/swornrivals.asm', 'SWORN RIVALS', true)   // keeps both creator picks
 
 // module id -> source file (id mirrors the path so relative requires resolve)
 const FILES = {
@@ -55,7 +58,8 @@ for (const [id, file] of Object.entries(FILES)) {
 out += 'var sys=__require("system"),cart=__require("cpu/cart");\n'
 out += 'function __b64(s){var b=atob(s),a=new Uint8Array(b.length);for(var i=0;i<b.length;i++){a[i]=b.charCodeAt(i);}return a;}\n'
 out += 'window.CastlePalm={System:sys.System,REG:sys.REG,buildCart:cart.buildCart,parseCart:cart.parseCart,'
-out += 'carts:{pong:__b64(' + JSON.stringify(pongB64) + '),snake:__b64(' + JSON.stringify(snakeB64) + '),palmblast:__b64(' + JSON.stringify(palmblastB64) + ')}};\n'
+out += 'carts:{pong:__b64(' + JSON.stringify(pongB64) + '),snake:__b64(' + JSON.stringify(snakeB64) + '),palmblast:__b64(' + JSON.stringify(palmblastB64) + ')'
+out += ',streetbrawl:__b64(' + JSON.stringify(streetbrawlB64) + '),siegestone:__b64(' + JSON.stringify(siegestoneB64) + '),swornrivals:__b64(' + JSON.stringify(swornrivalsB64) + ')}};\n'
 out += '})();\n'
 
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true })

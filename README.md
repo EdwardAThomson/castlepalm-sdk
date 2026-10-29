@@ -6,7 +6,7 @@ beyond Node**.
 
 <p align="center"><img src="castle_palm.png" alt="The CastlePalm handheld" width="240"></p>
 
-▶ **Play in your browser:** **[Castle Arcade](https://castle-arcade.octonion.io/)** — and load your own `.cpc` with **Load cartridge…** or drag-and-drop.
+▶ **Play in your browser:** **[Castle Arcade](https://castle.octonion.io/)** — and load your own `.cpc` with **Load cartridge…** or drag-and-drop.
 
 ## The console at a glance
 - **320×224** screen, 4bpp tiles, two scrolling background layers (one can go **affine / Mode-7**), **128 sprites**
@@ -71,7 +71,7 @@ of guessing. It points back at these docs for anything it needs to look up.
 
 | Path | What |
 | --- | --- |
-| `examples/` | `hello.asm` (start here), plus `pong.asm`, `snake.asm`, `palmblast.asm` |
+| `examples/` | `hello.asm` (start here), plus `pong.asm`, `snake.asm`, and four full games with procedurally generated 16-bit art: `palmblast/` (2P bomber), `streetbrawl/` (beat-'em-up), `siegestone/` (versus puzzle) and `swornrivals/` (1v1 fighter) |
 | `template/game.asm` | copy this to start a new cart |
 | `tools/` | `build-cart` (.asm → .cpc), `run` (build + screenshot), `png2tiles` (PNG → tiles), `bundle`, `disasm` |
 | `tools/castlepalm_ai_skill.md` | a system-prompt brief so an AI can help you write carts |
