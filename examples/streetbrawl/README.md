@@ -8,19 +8,33 @@ your health bar.
 | Controls | |
 | --- | --- |
 | **D-pad** | move (8-way, within the sidewalk band) |
-| **A** | punch, or swing your weapon if you're holding one |
+| **A** | jab, jab, kick combo; swings your weapon if you're holding one; flying kick in the air |
+| **B** | jump (jump over a boss's shockwave) |
 | **Start** | begin / restart |
 
+**Moves.** Landed hits chain into a three-hit combo, and the finishing kick knocks
+a thug down. Thugs lie on the ground for a moment and then get up, and a beaten
+thug blinks out. Walk into a standing thug to **grab** him: **A** drives a knee
+(the third one floors him), and **B** throws him the way you're holding, so a
+thrown body bowls over anyone it hits.
+
 After the title comes a **character creator**: Up/Down picks a row (body, skin,
-hair, top, legs, shoes), Left/Right changes it, **A** throws a test punch and
+hair, top, legs, shoes), Left/Right changes it, **A** throws a test punch, **B** a test kick and
 **Start** fights. There are eight bodies (Rio, Mara, Tank, Kenji, Zed, Fox, Lin,
 Wolf), and your pick is kept in the cart's save RAM.
 
 Thugs don't just walk into you: they square up, wind a punch back (the tell) and
 swing, and only a punch that lands costs health.
 
-Each **stage** is three thug waves and then a **boss** (its red health bar shows
-under the stage label). Clearing the boss rolls a **"STAGE n — GET READY"**
+Each **stage** is three thug waves and then a **boss** (its name and red health
+bar show under the stage label). Each boss has his own look and a special move:
+
+| Stage | Boss | Special |
+| --- | --- | --- |
+| 1 | **BRICK** | backs off, revs up and charges along your row, then stands dazed |
+| 2 | **VIPER** | hops out of reach and whistles in two runners, at 16 and 8 HP |
+| 3 | **WARDEN** | crouches, leaps and slams down a shockwave; jump to dodge it |
+ Clearing the boss rolls a **"STAGE n — GET READY"**
 interstitial and scrolls you into the next, freshly recoloured street. Clear the
 final boss and it's **YOU WIN**; let the thugs drain the health bar up top and it's
 **GAME OVER**.
@@ -49,7 +63,7 @@ food, and waves 2 and 4 drop a fresh pipe.
 
 ## Build & run
 
-All the art is drawn from code by `gen_art.js` into six binaries (already
+All the art is drawn from code by `gen_art.js` into eight binaries (already
 committed), which the cart `INCBIN`s. To rebuild them from source:
 
 ```sh
@@ -78,7 +92,12 @@ it into Castle Arcade.
   - `maps.bin`: the BG0 skyline and BG1 street maps
   - `pal.bin`: all 256 palette entries (stage 1 colours)
   - `levels.bin`: per stage, a 224-line sky gradient plus three recoloured banks
-  - `bodies.bin`: the eight selectable bodies, 6 frames each, DMA'd by the creator
+  - `bodies.bin`: the eight selectable bodies, 12 frames each (walk, punch, down,
+    then kick, jump, flying kick, grab, knee and throw as a second block), DMA'd
+    by the creator
+  - `bosses.bin`: a six-frame rig set per boss, DMA'd over the bruiser's frames
+    when the boss spawns
+  - `bosspal.bin`: the bosses' palette banks
   - `charpal.bin`: the creator's colour ramps for the player's palette bank
 
   Every material boundary sits on a tile edge, because a tile can only use one

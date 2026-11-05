@@ -10,7 +10,7 @@
 //   pal.bin     all 256 palette entries (RGB555), stage-1 colours
 //   levels.bin  per stage: 224-word sky gradient + banks 1, 2, 10
 //   bodies.bin  the player's selectable bodies: 6 frames x 64 tiles each,
-//               DMA'd over PL_WALK..PL_DOWN by the character creator
+//                                 DMA'd over PL_WALK..PL_DOWN by the character creator
 //   charpal.bin the creator's colour ramps (RGB555) for the player bank
 //
 // Layers: BG0 = clouds + two depths of skyline (parallax, scrolls at cam/4).
@@ -44,7 +44,10 @@ const T = {
   WEAPON: 912, WEAPON_UP: 916, FOOD: 920,
   GR_WIND: 924, GR_PUNCH: 988,   // thug attack: wind-up (telegraph), then the punch
   BR_WIND: 1052, BR_PUNCH: 1116,
-  BG_BASE: 1180,           // background tiles are deduped from here up
+  PL_KICK: 1180,           // the hero's move frames, a second block DMA'd per body:
+  PL_JUMP: 1244, PL_JKICK: 1308, PL_GRAB: 1372, PL_KNEE: 1436, PL_THROW: 1500,   // combo kick, jump, jump kick, hold, knee, throw
+  GR_HURT: 1564, BR_HURT: 1628,  // thug reeling (held / getting up)
+  BG_BASE: 1692,           // background tiles are deduped from here up
 }
 // ---- palette banks (keep in sync with the cart) ----
 const BANK = { HUD: 0, SKY: 1, GRUNT: 2, FONT: 3, FLASH: 4, PICK: 5, BOSS: 6, RUNNER: 7, BRUISER: 8, PLAYER: 9, BRICK: 10, SHOP: 11, WALK: 12, ROAD: 13, FENCE: 14, SHADOW: 15 }
@@ -136,7 +139,9 @@ const CHOICES = {        // creator rows after BODY, in cart order; ramp length 
 const CHAR_OUTLINE = '#140c14', CHAR_TRIM = '#f4f0e8'
 const charColours = sel => ({ ...Object.fromEntries(Object.entries(CHOICES).map(([k, c]) => [k, c.hexes[sel[k] || 0]])), outline: CHAR_OUTLINE, accent: CHAR_TRIM })
 Rig.makeBank(charColours({})).colours.forEach((c, i) => { palette[BANK.PLAYER * 16 + i + 1] = to555(c) })
-const BODY_POSES = [['walk', 0], ['walk', Math.PI / 2], ['walk', Math.PI], ['walk', Math.PI * 1.5], ['punch', 0], ['down', 0]]   // PL_WALK x4, PL_PUNCH, PL_DOWN
+const BODY_POSES = [['walk', 0], ['walk', Math.PI / 2], ['walk', Math.PI], ['walk', Math.PI * 1.5], ['punch', 0], ['down', 0],   // PL_WALK x4, PL_PUNCH, PL_DOWN
+  ['kick', 0], ['jump', 0], ['airkick', 0], ['grab', 0], ['knee', 0], ['throw', 0]]                                               // PL_KICK..PL_THROW
+const BODY_BASE = 6      // frames 0-5 land at PL_WALK, frames 6-11 at PL_KICK
 const BRICK = bank(BANK.BRICK, [
   ['b0', S1.brick[0]], ['b1', S1.brick[1]], ['b2', S1.brick[2]], ['b3', S1.brick[3]], ['deep', '#200e12'],
   ['m0', '#3e3234'], ['m1', '#5e5250'], ['s0', '#8a847c'], ['s1', '#c4bcae'],
@@ -414,6 +419,7 @@ function figure(opt, phase) {
   if (opt.guard) arms = [{ up: 0.8, fo: 2.3 }, { up: 0.45, fo: 2.0 }]
   if (opt.punch) arms = [{ up: 0.6, fo: 2.2 }, { up: 1.55, fo: 1.6 }]
   if (opt.windup) arms = [{ up: 1.1, fo: 2.4 }, { up: -1.35, fo: -2.6 }]   // lead fist cocked back by the ear
+  if (opt.hurt) arms = [{ up: 0.35, fo: 1.1 }, { up: 0.75, fo: 1.6 }]       // reeling: head snapped back, arms trailing
   arm(arms[0], true)
   leg(legs[0], true)
   leg(legs[1], false)
@@ -426,7 +432,8 @@ function figure(opt, phase) {
   if (opt.hair === 'mohawk') P.push({ cap: [add(head, [-4, -4]), add(head, [3, -8])], r: [2.2, 1.6], mat: 'hr' })
   if (opt.hair === 'beard') P.push({ ell: add(head, [1.5, 3.5]), rx: 4.2 * s, ry: 3.2 * s, mat: 'hr', clip: (x, y) => y > head[1] + 1 })
   if (opt.band) { P.push({ cap: [add(head, [-5.6, -2.4]), add(head, [5.6, -3.0])], r: [0.9, 0.9], mat: 'jk' }); P.push({ cap: [add(head, [-5.2, -2.6]), add(head, [-11, 1 + Math.sin(phase * 2)])], r: [1.2, 0.8], mat: 'jk' }) }
-  P.push({ ell: add(head, [2.8 * s, -0.4]), rx: 0.7, ry: 1.2, mat: 'ol' })
+  if (opt.shades) P.push({ cap: [add(head, [0.6 * s, -0.8]), add(head, [5.8 * s, -0.6])], r: [1.5, 1.5], mat: 'ol' })
+  else P.push({ ell: add(head, [2.8 * s, -0.4]), rx: 0.7, ry: 1.2, mat: 'ol' })
   arm(arms[1], false)
   return P
 }
@@ -484,17 +491,50 @@ const bodyTiles = BODIES.map(b => {
   })
   return blk
 })
-tiles.set(bodyTiles[0], T.PL_WALK * 32)
+tiles.set(bodyTiles[0].subarray(0, BODY_BASE * 2048), T.PL_WALK * 32)
+tiles.set(bodyTiles[0].subarray(BODY_BASE * 2048), T.PL_KICK * 32)
 const gruntOpt = { hair: 'mohawk', guard: true, vestOpen: true, stride: 0.35 }
 for (let f = 0; f < 2; f++) putBlock(T.GR_WALK + f * 64, renderRig(GRUNT, figure(gruntOpt, f * Math.PI + Math.PI / 2)), 64)
 putBlock(T.GR_DOWN, knockedDown(renderRig(GRUNT, figure({ ...gruntOpt, guard: false, stride: 0 }, 0))), 64)
 putBlock(T.GR_WIND, renderRig(GRUNT, figure({ ...gruntOpt, guard: false, windup: true, stride: 0.2, lean: -3 }, Math.PI / 2)), 64)
 putBlock(T.GR_PUNCH, renderRig(GRUNT, figure({ ...gruntOpt, guard: false, punch: true, stride: 0.45, lean: 2.5 }, Math.PI / 2)), 64)
+putBlock(T.GR_HURT, renderRig(GRUNT, figure({ ...gruntOpt, guard: false, hurt: true, stride: 0, stance: true, lean: -6.5 }, 0)), 64)
 const bruteOpt = { hair: 'beard', guard: true, bulk: 1.35, belly: 1.45, sleeves: true, stride: 0.25 }
 for (let f = 0; f < 2; f++) putBlock(T.BR_WALK + f * 64, renderRig(BRUTE_FRAME_BANK, figure(bruteOpt, f * Math.PI + Math.PI / 2)), 64)
 putBlock(T.BR_DOWN, knockedDown(renderRig(BRUTE_FRAME_BANK, figure({ ...bruteOpt, guard: false, stride: 0 }, 0))), 64)
 putBlock(T.BR_WIND, renderRig(BRUTE_FRAME_BANK, figure({ ...bruteOpt, guard: false, windup: true, stride: 0.15, lean: -3 }, Math.PI / 2)), 64)
 putBlock(T.BR_PUNCH, renderRig(BRUTE_FRAME_BANK, figure({ ...bruteOpt, guard: false, punch: true, stride: 0.35, lean: 2.5 }, Math.PI / 2)), 64)
+putBlock(T.BR_HURT, renderRig(BRUTE_FRAME_BANK, figure({ ...bruteOpt, guard: false, hurt: true, stride: 0, stance: true, lean: -6 }, 0)), 64)
+// ---- stage bosses: each a set of the six big-rig frames, DMA'd over the bruiser's
+// (BR_WALK x2, BR_DOWN, BR_WIND, BR_PUNCH, BR_HURT) when the boss walks on; set 0 is the
+// bruiser itself, restored for the next stage. Each boss also brings a bank-6 palette.
+const BOSSES = [
+  { name: 'BRICK', opt: { guard: true, bulk: 1.5, belly: 1.6, stride: 0.22 },                 // stage 1: bald brawler who charges
+    pal: ['#140c0a', '#7a4a30', '#a86a48', '#d89a70', '#2a2018', '#4a3828', '#7a2e08', '#c0581a', '#f08a3a', '#2a3048', '#3e4870', '#5a68a0', '#1a1418', '#3a3036', '#f4f0e8'] },
+  { name: 'VIPER', opt: { hair: 'short', band: true, guard: true, bulk: 0.9, sleeves: 'long', stride: 0.45 },   // stage 2: quick, hops, calls backup
+    pal: ['#0c0a14', '#8a5a4a', '#c09078', '#ecc4a4', '#101018', '#2a2a38', '#0e3a2a', '#1a7050', '#3ac088', '#141418', '#26262e', '#3c3c48', '#4a1010', '#8a2020', '#e8e8f0'] },
+  { name: 'WARDEN', opt: { hair: 'beard', shades: true, guard: true, bulk: 1.45, belly: 1.3, sleeves: 'long', stride: 0.2 }, // stage 3: leaps and slams the street
+    pal: ['#0a0808', '#3a2418', '#5a3a26', '#7e5638', '#6a6a70', '#a8a8b0', '#3a0a0e', '#6e1620', '#a8303a', '#1a1a20', '#2e2e38', '#484858', '#0e0c0c', '#2a2626', '#ffd040'] },
+]
+function rigSet(B, o) {          // the six frames, in DMA order, as one 12 KB block
+  const imgs = [
+    renderRig(B, figure(o, Math.PI / 2)), renderRig(B, figure(o, Math.PI * 1.5)),
+    knockedDown(renderRig(B, figure({ ...o, guard: false, stride: 0 }, 0))),
+    renderRig(B, figure({ ...o, guard: false, windup: true, stride: 0.15, lean: -3 }, Math.PI / 2)),
+    renderRig(B, figure({ ...o, guard: false, punch: true, stride: 0.35, lean: 2.5 }, Math.PI / 2)),
+    renderRig(B, figure({ ...o, guard: false, hurt: true, stride: 0, stance: true, lean: -6 }, 0)),
+  ]
+  const blk = new Uint8Array(6 * 2048)
+  imgs.forEach((img, f) => {
+    for (let ty = 0; ty < 8; ty++) for (let tx = 0; tx < 8; tx++) for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x += 2) {
+      const k = (ty * 8 + y) * 64 + tx * 8 + x
+      blk[(f * 64 + ty * 8 + tx) * 32 + y * 4 + (x >> 1)] = (img[k] << 4) | img[k + 1]
+    }
+  })
+  return blk
+}
+const bossSets = [rigSet(BRUTE_FRAME_BANK, bruteOpt), ...BOSSES.map(b => rigSet(charBank(BANK.BOSS, b.pal), b.opt))]
+charBank(BANK.BOSS, BOSSES[0].pal)   // boot palette: the first boss
 // shadow (32x32, ellipse near the bottom) and 16x16 pickups
 const shadow = new Uint8Array(32 * 32)
 for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) if (Math.hypot((x + 0.5 - 16) / 14, (y + 0.5 - 28) / 3.4) < 1) shadow[y * 32 + x] = 1
@@ -546,6 +586,8 @@ const files = {
   'pal.bin': le16([...palette]),
   'levels.bin': Buffer.concat(STAGES.map(levelRec)),
   'bodies.bin': Buffer.concat(bodyTiles.map(b => Buffer.from(b))),
+  'bosses.bin': Buffer.concat(bossSets.map(b => Buffer.from(b))),
+  'bosspal.bin': le16(BOSSES.flatMap(b => b.pal.map(h => to555(hex(h))))),
   'charpal.bin': le16([...Object.values(CHOICES).flatMap(c => c.hexes.flatMap(h => Rig.ramp(h, c.n).map(to555))),
     to555(hex(CHAR_OUTLINE)), to555(hex(CHAR_TRIM))]),
 }
@@ -554,5 +596,5 @@ if (require.main === module) {
   for (const [name, buf] of Object.entries(files)) fs.writeFileSync(path.join(__dirname, name), buf)
   console.log(`streetbrawl art: ${topTile} tiles (${topTile - T.BG_BASE} background), level record ${levelRecordBytes} bytes`)
 }
-const bodyBytes = bodyTiles[0].length
-module.exports = { T, BANK, files, tileCount: topTile, levelRecordBytes, BODIES, CHOICES, bodyBytes, GLYPHS, DIGITS, ARROWS, CHAR_OUTLINE, CHAR_TRIM }
+const bodyBytes = bodyTiles[0].length, bodyBaseBytes = BODY_BASE * 2048
+module.exports = { T, BANK, files, tileCount: topTile, levelRecordBytes, BODIES, bodyBaseBytes, BOSSES, CHOICES, bodyBytes, GLYPHS, DIGITS, ARROWS, CHAR_OUTLINE, CHAR_TRIM }
