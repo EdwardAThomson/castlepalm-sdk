@@ -10,7 +10,7 @@ your health bar.
 | **D-pad** | move (8-way, within the sidewalk band) |
 | **A** | jab, jab, kick combo; swings your weapon if you're holding one; flying kick in the air |
 | **B** | jump (jump over a boss's shockwave) |
-| **Start** | begin / restart |
+| **Start** | begin / restart; pause during play |
 
 **Moves.** Landed hits chain into a three-hit combo, and the finishing kick knocks
 a thug down. Thugs lie on the ground for a moment and then get up, and a beaten
@@ -36,8 +36,23 @@ bar show under the stage label). Each boss has his own look and a special move:
 | 3 | **WARDEN** | crouches, leaps and slams down a shockwave; jump to dodge it |
  Clearing the boss rolls a **"STAGE n — GET READY"**
 interstitial and scrolls you into the next, freshly recoloured street. Clear the
-final boss and it's **YOU WIN**; let the thugs drain the health bar up top and it's
-**GAME OVER**.
+final boss and it's **YOU WIN**.
+
+**Score, lives and continues.** The top HUD row shows `SCORE`, `LIVES` and `HI`.
+Points come from:
+
+- every landed hit (10)
+- each beaten thug: 100 for a grunt, 150 for a runner, 200 for a bruiser
+- each boss (5000)
+- food (50)
+- a stage-clear bonus of 100 for each health cell you have left
+
+When the health bar runs out, you lose one of your 3 lives. The hero lies on the
+street for a moment, then gets back up with a full bar and a grace period, and
+knocks every standing thug down. Out of lives, a **CONTINUE** count runs from 9 to 0
+(A hurries it). **Start** spends one of 3 credits and replays the stage from its
+start, with the score reset. When the count runs out, it's **GAME OVER**. The
+high score is kept in the cart's save RAM and shows on the title screen.
 
 Three **thug types** come at you, colour-coded and mixed in escalating combinations
 per wave (see the `wavedef` table):

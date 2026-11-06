@@ -14,15 +14,18 @@
 ;   Three thug types mix in per wave (grunt / fast runner / tanky bruiser), driven
 ;   by the TYPE* stat tables + the wavedef spawn table. Clear a wave and the street
 ;   scrolls on; clear three waves and a boss to finish a stage, then an interstitial
-;   leads into the next of three stages. Clear the last boss to WIN, or run out of
-;   health for GAME OVER. Grab a lead pipe to hit harder and farther (limited
+;   leads into the next of three stages. Clear the last boss to WIN. Run out of
+;   health and you lose a life (3 per credit; getting back up floors the gang); out
+;   of lives, a 9..0 CONTINUE count lets Start replay the stage (3 continues, the
+;   score starts over) before GAME OVER. Hits, kills (by type), food, bosses and the
+;   health left at a stage's end score points; the high score lives in save RAM. Grab a lead pipe to hit harder and farther (limited
 ;   swings), and a drumstick to restore health.
 ;
 ;   Hits land with a brief hit-stop freeze and a camera shake for punch; a one-channel
 ;   chiptune riff loops on square-1 (SFX stay on square-0).
 ;
 ;   Controls:  D-pad = move    A = punch / swing / knee    B = jump / throw
-;              Start = begin / restart
+;              Start = begin / restart, pause in play
 ;   Character creator (after the title): Up/Down pick a row, Left/Right change it,
 ;   A throws a test punch, B a test kick, Start fights. The pick is kept in save RAM.
 ;
@@ -66,10 +69,11 @@ SQ1_VOL    EQU $102006
 SQ1_CTRL   EQU $102007
 SAVECOMMIT EQU $100016    ; poke nonzero once save RAM holds a coherent record; host persists it
 
-; ---- cartridge save RAM ($200000-$207FFF): a per-browser best-kills high score ----
+; ---- cartridge save RAM ($200000-$207FFF): per-browser high score, best kills, fighter ----
 SV_MAG   EQU $200000      ; u16 marker word (SVMAGIC = a valid Street Brawl save)
 SV_BEST  EQU $200002      ; u16 best kills across runs
 SV_CHAR  EQU $200004      ; 6 bytes: the creator's picks (same order as c_body..)
+SV_HI    EQU $20000A      ; u16 high score (in tens: the HUD prints a trailing 0)
 SVMAGIC  EQU $B501        ; distinctive non-zero marker (fresh save RAM is all zeros)
 
 ; ---- input bits ----
@@ -219,6 +223,16 @@ ATKREACH EQU 32         ; how far in front the punch lands (px between logic box
 ATKHY    EQU 10         ; row tolerance for the punch to land
 ESTAND   EQU 20         ; thugs close to this x gap, not on top of the player
 HP0      EQU 16         ; starting health (= HP bar cells)
+; ---- score, lives, continues ----
+LIVES0   EQU 3          ; lives per credit
+CREDITS0 EQU 3          ; continues after the first credit runs out
+DEADT    EQU 80         ; frames the hero lies on the street when his health runs out
+RESPAWNI EQU 120        ; i-frames when he gets back up on a fresh life
+CONTT    EQU 600        ; continue countdown: 9..0, a digit a second
+PTS_HIT  EQU 1          ; scores are kept in tens: a landed hit is 10 points
+PTS_FOOD EQU 5
+PTS_BOSS EQU 500        ; a boss is 5000
+PTS_HPB  EQU 10         ; stage-clear bonus per health cell left (100 each)
 BANDTOP  EQU 112        ; player/enemy vertical play band (py range; feet = py+16, on the sidewalk/road)
 BANDBOT  EQU 190
 XMIN     EQU 16
@@ -271,7 +285,7 @@ HSKILL   EQU 4          ; freeze frames on a kill
 NOTELEN  EQU 9          ; frames each note is held (tempo)
 
 ; ---- RAM ----
-state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over, 4 interstitial, 5 creator
+state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over, 4 interstitial, 5 creator, 6 continue
 in_now   EQU $000104
 in_prev  EQU $000106
 sfxT     EQU $000108
@@ -329,6 +343,13 @@ b_vy     EQU $00019A    ; (Viper: hop speed; Warden: leap dy)
 b_frame  EQU $00019C    ; 0 normal frames, 1 wind-up, 2 punch, 3 reeling
 b_flash  EQU $00019E    ; nonzero: flash the telegraph this frame (bit 2 used)
 b_calls  EQU $0001A0    ; Viper: runners called so far
+score    EQU $0001A2    ; this credit's score, in tens (saturates at 65535)
+hiscore  EQU $0001A4    ; best score, in tens (save RAM; climbs live as you beat it)
+lives    EQU $0001A6    ; lives left, counting the one in play
+credits  EQU $0001A8    ; continues left
+paused   EQU $0001AA    ; 1 while play is paused (Start toggles)
+p_dead   EQU $0001AC    ; frames left lying down after the health bar ran out
+contT    EQU $0001AE    ; continue countdown (state 6)
 CHARPAL  EQU $000600    ; 15 words: the player's bank, assembled from the picks
 SKYTAB   EQU $000400    ; 224 RGB555 words: this stage's sky, one per scanline (hblank reads it)
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
@@ -400,6 +421,7 @@ start:
   STW R0, [hitstop]
   STW R0, [mIdx]           ; start the music loop from the top
   STW R0, [mT]
+  STW R0, [paused]
   CALL loadsave            ; restore best-kills from cartridge save RAM (0 if none)
   CALL loadchar            ; and the saved fighter (body tiles + player bank)
   CALL drawtitle
@@ -418,7 +440,12 @@ mainloop:
   BEQ ml_inter
   CMP R0, #5
   BEQ ml_create
+  CMP R0, #6
+  BEQ ml_cont
   CALL menuframe
+  BRA ml_wait
+ml_cont:
+  CALL contframe
   BRA ml_wait
 ml_play:
   CALL playframe
@@ -430,7 +457,11 @@ ml_create:
   CALL creatorframe
 ml_wait:
   CALL sfxtick
+  LDW R0, [paused]         ; the music holds while paused
+  CMP R0, #0
+  BNE ml_quiet
   CALL musictick
+ml_quiet:
   LDW R0, [FRAMECTR]       ; hblank IRQs also wake WAIT: sleep until the frame counter moves
   STW R0, [wframe]
 ml_sleep:
@@ -508,6 +539,19 @@ mf_done:
 
 ; ============================ one play frame ============================
 playframe:
+  LDW R0, [in_now]         ; Start (edge) pauses / resumes
+  AND R0, #START
+  BEQ pf_np
+  LDW R0, [in_prev]
+  AND R0, #START
+  BNE pf_np
+  CALL togglepause
+pf_np:
+  LDW R0, [paused]
+  CMP R0, #0
+  BEQ pf_go
+  RET                      ; paused: the scene (and its OAM) holds
+pf_go:
   LDW R0, [hitstop]        ; hit-freeze: hold the whole scene for a few frames
   CMP R0, #0
   BEQ pf_run
@@ -518,11 +562,19 @@ pf_run:
   LDW R0, [gtick]          ; free-running tick (half-speed bruisers key off it)
   ADD R0, #1
   STW R0, [gtick]
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_down
   CALL domove
   CALL jumpupdate
   CALL attackupdate
   CALL doenemies
   CALL dopickups
+  BRA pf_tick
+pf_down:
+  CALL jumpupdate          ; knocked out: he still falls if he was in the air
+  CALL doenemies           ; and the gang keeps moving
+pf_tick:
   LDW R0, [p_hurt]         ; tick i-frames
   CMP R0, #0
   BEQ pf_nh
@@ -537,20 +589,30 @@ pf_nh:
   BEQ pf_nbb
   CALL drawbosshp
 pf_nbb:
+  CALL drawscore
   CALL buildoam
-  LDW R0, [p_hp]           ; dead?
+  LDW R0, [p_hp]           ; out of health?
   CMP R0, #0
   BNE pf_ckwin
-  MOV R0, #3
-  STW R0, [state]
-  CALL savebest            ; commit a new best-kills if this run beat it
-  CALL clearoam
-  CALL drawover
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_dying
+  CALL playerdown          ; he hits the street
+  RET
+pf_dying:
+  SUB R0, #1
+  STW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_ret
+  CALL lostlife            ; next life, the continue screen, or game over
+pf_ret:
   RET
 pf_ckwin:
   CALL countalive          ; current wave cleared?
   CMP R0, #0
-  BNE pf_done
+  BEQ pf_clr
+  RET
+pf_clr:
   LDW R0, [wave]           ; was it the boss wave?
   CMP R0, #NORMW
   BLT pf_adv               ; normal wave -> next wave, same level
@@ -559,6 +621,10 @@ pf_ckwin:
   BNE pf_pausetick
   MOV R0, #CLRPAUSE        ; first frame the boss is down: start the pause
   STW R0, [clrpause]
+  LDW R0, [p_hp]           ; stage-clear bonus for the health you kept
+  MOV R1, #PTS_HPB
+  MULU R0, R1
+  CALL addscore
   RET
 pf_pausetick:
   SUB R0, #1
@@ -1238,6 +1304,10 @@ enemyhit:
   MOV R0, #0
 eh_set:
   STB R0, [A1+#1]
+  PUSH R0
+  MOV R0, #PTS_HIT         ; every landed hit scores
+  CALL addscore
+  POP R0
   MOV R1, #HITSTUN
   STB R1, [A1+#2]
   LDW R1, [p_wswing]     ; pipe hits land with a brief freeze; fists don't
@@ -1279,6 +1349,7 @@ eh_kill:
 
 ; ---- ekill(A1,A3): he's beaten: count it, juice it; he blinks out once he's down ----
 ekill:
+  CALL killscore
   MOV R1, #1
   STB R1, [A3+#11]
   LDW R1, [kills]
@@ -1710,6 +1781,11 @@ ek_miss:
 
 ; ---- hurtplayer(R4=enemy x, R2=damage): lose health, i-frames, shake, shove away ----
 hurtplayer:
+  LDW R0, [p_dead]         ; already out cold: the gang can't hurt him more
+  CMP R0, #0
+  BEQ hu_live
+  RET
+hu_live:
   LDW R0, [p_grab]         ; a hit shakes the held thug loose ...
   CMP R0, #0
   BEQ hu_ng
@@ -1859,6 +1935,7 @@ uc_write:
 buildoam:
   MOV R0, #0
   STW R0, [OAM_INDEX]
+bo_go:
   LDW R0, [p_y]
   CALL depthpri
   CALL emitweapon          ; held pipe first so it draws over the hero's hand (off when unarmed)
@@ -1961,6 +2038,12 @@ emitplayer:
   CALL emitoff
   RET
 ep_draw:
+  MOV R5, #PL_DOWN         ; out cold
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BEQ ep_live
+  BRA ep_attr
+ep_live:
   LDW R0, [p_punch]        ; pick the frame: throw > grab/knee > air > swing > walk
   LDW R1, [p_atk]
   CMP R0, #0
@@ -2412,6 +2495,324 @@ drawlevelhud:
   ADD R0, #1             ; show 1-based
   MOV R4, #23
   CALL huddigit
+  LDA A1, #sSCORE         ; top row: SCORE ... LIVES n ... HI
+  MOV R4, #0
+  MOV R5, #0
+  CALL print
+  LDA A1, #sHI
+  MOV R4, #29
+  MOV R5, #0
+  CALL print
+  CALL drawlives
+  CALL drawscore
+  RET
+
+; ---- drawlives: "LIVES n" on the top HUD row ----
+drawlives:
+  LDA A1, #sLIVES
+  MOV R4, #17
+  MOV R5, #0
+  CALL print
+  LDW R0, [lives]
+  MOV R4, #23
+  MOV R5, #0
+  CALL printdigit
+  RET
+
+; ---- drawscore: the score and the high score on the top HUD row ----
+drawscore:
+  LDW R0, [score]
+  MOV R4, #6
+  MOV R5, #0
+  CALL drawnum6
+  LDW R0, [hiscore]
+  MOV R4, #32
+  MOV R5, #0
+  CALL drawnum6
+  RET
+
+; ---- drawnum6(R0=value in tens, R4=col, R5=row): six digits, the last always 0 ----
+drawnum6:
+  STW R0, [svrem]
+  MOV R2, #10000
+  CALL n6dig
+  MOV R2, #1000
+  CALL n6dig
+  MOV R2, #100
+  CALL n6dig
+  MOV R2, #10
+  CALL n6dig
+  MOV R2, #1
+  CALL n6dig
+  MOV R0, #0
+  STW R0, [svrem]
+  MOV R2, #1
+; ---- n6dig(R2=place): print svrem / place at (R4, R5), keep the remainder, R4++ ----
+n6dig:
+  LDW R0, [svrem]
+  MOV R1, #0
+  DIVU R0, R2              ; R0 = digit, R1 = remainder
+  STW R1, [svrem]
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile
+  ADD R4, #1
+  RET
+
+; ---- addscore(R0 = points in tens): saturating add; the high score follows it up ----
+addscore:
+  LDW R1, [score]
+  ADD R0, R1
+  CMP R1, R0
+  BLS as_ok                ; old <= new: no carry out of 16 bits
+  MOV R0, #$FFFF
+as_ok:
+  STW R0, [score]
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BLS as_done
+  STW R0, [hiscore]
+as_done:
+  RET
+
+; ---- killscore(A3): points for a beaten enemy: by type, or the boss bonus ----
+killscore:
+  LDB R0, [A3+#12]
+  CMP R0, #0
+  BNE ks_thug
+  LDW R1, [bossactive]
+  CMP R1, #0
+  BEQ ks_thug
+  MOV R0, #PTS_BOSS
+  CALL addscore
+  RET
+ks_thug:
+  LDA A0, #ETYPE
+  ADD A0, R0
+  LDB R0, [A0]
+  LDA A0, #TYPEPTS
+  ADD A0, R0
+  LDB R0, [A0]
+  CALL addscore
+  RET
+
+; ---- togglepause: Start in play freezes everything and shows PAUSED ----
+togglepause:
+  LDW R0, [paused]
+  XOR R0, #1
+  STW R0, [paused]
+  CMP R0, #0
+  BEQ tp_off
+  MOV R1, #0               ; the letters go first in OAM (first wins a priority tie)
+  STW R1, [OAM_INDEX]
+  MOV R0, #0               ; hush both channels
+  STB R0, [SQ1_CTRL]
+  STB R0, [SQ0_CTRL]
+  MOV R0, #7
+  STW R0, [sprpri]
+  LDA A1, #sPAUSED
+  MOV R0, #136             ; centred: 6 letters x 8 px
+tp_lp:
+  LDB R5, [A1]
+  CMP R5, #$FF
+  BEQ tp_snd
+  ADD R5, #FONT
+  MOV R1, #92
+  MOV R6, #PB_FONT         ; 8x8, the HUD font's bank
+  PUSH R0
+  CALL emittile
+  POP R0
+  ADD R0, #8
+  INC A1
+  BRA tp_lp
+tp_snd:
+  CALL bo_go               ; then the frozen scene behind them
+  MOV R0, #300
+  CALL sfxblip
+  RET
+tp_off:
+  CALL clearoam            ; drop the letters; this frame's buildoam redraws the scene
+  RET
+
+; ---- playerdown: the health bar ran out: drop everything and hit the street ----
+playerdown:
+  MOV R0, #DEADT
+  STW R0, [p_dead]
+  LDW R0, [p_grab]         ; let go of anyone held
+  CMP R0, #0
+  BEQ pd_ng
+  SUB R0, #1
+  SHL R0, #4
+  LDA A0, #EX
+  ADD A0, R0
+  MOV R0, #0
+  STB R0, [A0]
+pd_ng:
+  MOV R0, #0
+  STW R0, [p_grab]
+  STW R0, [p_punch]
+  STW R0, [p_atk]
+  STW R0, [p_combo]
+  STW R0, [p_chain]
+  STW R0, [p_jkick]
+  STW R0, [p_weapon]       ; the pipe goes flying
+  STW R0, [p_wswing]
+  MOV R0, #SHAKEW
+  STW R0, [shakeT]
+  MOV R0, #500
+  CALL sfxblip
+  RET
+
+; ---- lostlife: back up on the next life (knocking the gang down), else continue? ----
+lostlife:
+  LDW R0, [lives]
+  CMP R0, #1
+  BLS ll_out
+  SUB R0, #1
+  STW R0, [lives]
+  MOV R0, #HP0
+  STW R0, [p_hp]
+  MOV R0, #RESPAWNI
+  STW R0, [p_hurt]
+  CALL drawlives
+  CALL knockall
+  MOV R0, #150
+  CALL sfxblip
+  RET
+ll_out:
+  MOV R0, #0
+  STW R0, [lives]
+  LDW R0, [credits]
+  CMP R0, #0
+  BEQ gameover
+  MOV R0, #6               ; out of lives: offer a continue
+  STW R0, [state]
+  MOV R0, #CONTT
+  STW R0, [contT]
+  CALL savebest
+  CALL clearoam
+  CALL drawcont
+  RET
+
+; ---- gameover: record the run and show GAME OVER ----
+gameover:
+  MOV R0, #3
+  STW R0, [state]
+  CALL savebest            ; commit a new best-kills / high score
+  CALL clearoam
+  CALL drawover
+  RET
+
+; ---- knockall: getting back up floors every standing thug (not the boss) ----
+knockall:
+  MOV R7, #0
+ka_lp:
+  CALL slotptrs
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ ka_next
+  LDB R0, [A3+#0]
+  CMP R0, #0
+  BNE ka_next
+  CMP R7, #0
+  BNE ka_go
+  LDW R0, [bossactive]
+  CMP R0, #0
+  BNE ka_next
+ka_go:
+  PUSH R7
+  CALL launch
+  POP R7
+ka_next:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT ka_lp
+  RET
+
+; ---- contframe: count down 9..0; Start spends a credit and replays this stage,
+;      A hurries the count, and at 0 it's GAME OVER ----
+contframe:
+  LDW R0, [in_now]
+  LDW R1, [in_prev]
+  NOT R1
+  AND R1, R0
+  MOV R0, R1
+  AND R0, #START
+  BEQ cn_a
+  LDW R0, [credits]
+  SUB R0, #1
+  STW R0, [credits]
+  MOV R0, #0
+  STW R0, [score]
+  MOV R0, #LIVES0
+  STW R0, [lives]
+  MOV R0, #HP0
+  STW R0, [p_hp]
+  MOV R0, #120
+  CALL sfxblip
+  LDW R0, [level]
+  CALL loadlevel
+  MOV R0, #1
+  STW R0, [state]
+  RET
+cn_a:
+  AND R1, #ABTN
+  BEQ cn_tick
+  LDW R0, [contT]          ; A: skip to the next digit: contT = digit*60 + 1
+  SUB R0, #1
+  MOV R1, #0
+  MOV R2, #60
+  DIVU R0, R2
+  MOV R1, #60
+  MULU R0, R1
+  ADD R0, #1
+  STW R0, [contT]
+cn_tick:
+  LDW R0, [contT]
+  SUB R0, #1
+  STW R0, [contT]
+  CMP R0, #0
+  BNE cn_draw
+  CALL gameover
+  RET
+cn_draw:
+  SUB R0, #1               ; digit = (contT - 1) / 60
+  MOV R1, #0
+  MOV R2, #60
+  DIVU R0, R2
+  MOV R4, #20
+  MOV R5, #8
+  CALL printdigit
+  RET
+
+; ---- drawcont: CONTINUE? with the countdown and the credits left ----
+drawcont:
+  CALL menureset
+  CALL menubg
+  LDA A1, #sCONT
+  MOV R4, #16
+  MOV R5, #5
+  CALL print
+  MOV R0, #9
+  MOV R4, #20
+  MOV R5, #8
+  CALL printdigit
+  LDA A1, #sCREDITS
+  MOV R4, #15
+  MOV R5, #11
+  CALL print
+  LDW R0, [credits]
+  MOV R4, #23
+  MOV R5, #11
+  CALL printdigit
+  LDA A1, #sSTART
+  MOV R4, #15
+  MOV R5, #13
+  CALL print
+  CALL oversprites
   RET
 
 ; ---- clearhp: blank the HUD rows 0-2 (HP bar + weapon widget + boss bar) ----
@@ -2594,10 +2995,13 @@ loadsave:
   BNE ld_fresh
   LDW R0, [SV_BEST]
   STW R0, [best]
+  LDW R0, [SV_HI]
+  STW R0, [hiscore]
   RET
 ld_fresh:
   MOV R0, #0
   STW R0, [best]
+  STW R0, [hiscore]
   RET
 
 ; ---- savebest: if this run's kills beat the stored best, update it, write a
@@ -2606,11 +3010,40 @@ savebest:
   LDW R0, [kills]
   LDW R1, [best]
   CMP R0, R1
-  BLS sv_done              ; kills <= best -> no new record (unsigned)
+  BLS sv_kept              ; kills <= best -> keep the old record (unsigned)
   STW R0, [best]
+sv_kept:
+  LDW R0, [score]          ; (addscore keeps hiscore up, but make sure)
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BLS sv_hi
+  STW R0, [hiscore]
+sv_hi:
+  LDW R0, [SV_HI]          ; nothing new to keep? (hiscore already climbed live)
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BNE sv_write
+  LDW R0, [SV_BEST]
+  LDW R1, [best]
+  CMP R0, R1
+  BEQ sv_done
+sv_write:
   MOV R1, #SVMAGIC
   STW R1, [SV_MAG]
+  LDW R0, [best]
   STW R0, [SV_BEST]
+  LDW R0, [hiscore]
+  STW R0, [SV_HI]
+  LDA A0, #c_body          ; the fighter too, so the record is whole
+  LDA A1, #SV_CHAR
+  MOV R2, #CROWS
+sv_cp:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sv_cp
   MOV R1, #1
   STB R1, [SAVECOMMIT]     ; record complete -> host persists save RAM
 sv_done:
@@ -2673,14 +3106,14 @@ drawtitle:
   MOV R4, #15
   MOV R5, #11
   CALL print
-  LDA A1, #sBEST           ; per-browser high score, restored from save RAM
-  MOV R4, #16
+  LDA A1, #sHISC           ; per-browser high score, restored from save RAM
+  MOV R4, #12
   MOV R5, #13
   CALL print
-  LDW R0, [best]
+  LDW R0, [hiscore]
   MOV R4, #21
   MOV R5, #13
-  CALL drawnum3
+  CALL drawnum6
   MOV R0, #1               ; the lineup's boss is Brick
   CALL loadbr
   MOV R0, #0
@@ -2758,6 +3191,7 @@ drawwin:
   MOV R4, #15
   MOV R5, #9
   CALL print
+  CALL drawresult
   CALL winsprites
   RET
 
@@ -2805,15 +3239,29 @@ drawover:
   MOV R4, #15
   MOV R5, #9
   CALL print
-  LDA A1, #sBEST           ; show the (possibly just-updated) best-kills record
-  MOV R4, #16
+  CALL drawresult
+
+  CALL oversprites
+  RET
+
+; ---- drawresult: SCORE and HI SCORE under a win / game over ----
+drawresult:
+  LDA A1, #sSCORE
+  MOV R4, #15
   MOV R5, #11
   CALL print
-  LDW R0, [best]
+  LDW R0, [score]
   MOV R4, #21
   MOV R5, #11
-  CALL drawnum3
-  CALL oversprites
+  CALL drawnum6
+  LDA A1, #sHISC
+  MOV R4, #12
+  MOV R5, #13
+  CALL print
+  LDW R0, [hiscore]
+  MOV R4, #21
+  MOV R5, #13
+  CALL drawnum6
   RET
 
 ; ---- oversprites: the hero is down; the gang stands over him ----
@@ -3004,6 +3452,8 @@ sc_lp:
   BNE sc_lp
   LDW R0, [best]
   STW R0, [SV_BEST]
+  LDW R0, [hiscore]
+  STW R0, [SV_HI]
   MOV R1, #SVMAGIC
   STW R1, [SV_MAG]
   MOV R1, #1
@@ -3279,7 +3729,13 @@ cs_done:
 newgame:
   MOV R0, #0
   STW R0, [kills]
+  STW R0, [score]
   STW R0, [level]
+  MOV R0, #LIVES0
+  STW R0, [lives]
+  MOV R0, #CREDITS0
+  STW R0, [credits]
+  MOV R0, #0
   CALL loadlevel           ; build stage 0 (R0 = 0)
   MOV R0, #HP0
   STW R0, [p_hp]           ; full health for a fresh game
@@ -3315,6 +3771,8 @@ loadlevel:
   STW R0, [p_grab]
   STW R0, [p_gcool]
   STW R0, [p_jkick]
+  STW R0, [p_dead]
+  STW R0, [paused]
   MOV R0, #80
   STW R0, [p_x]            ; start at the left of the new street
   MOV R0, #150
@@ -3477,6 +3935,8 @@ dp_food:
   MOV R0, #HP0
 dp_heal:
   STW R0, [p_hp]
+  MOV R0, #PTS_FOOD
+  CALL addscore
   MOV R0, #70
   CALL sfxblip
 dp_take:
@@ -4345,6 +4805,8 @@ TYPEDMG:                         ; punch damage
   DB 1, 1, 2
 TYPEBANK:                        ; sprite palette bank
   DB 2, 7, 8
+TYPEPTS:                         ; points for beating one (in tens)
+  DB 10, 15, 20
 TYPETILE:                        ; walk-frame-A tile base (grunt + runner share a rig, recoloured)
   DW GR_WALK, GR_WALK, BR_WALK
 
@@ -4440,6 +4902,20 @@ sOVER:
   DB G, A, M, E, SPC, O, V, E, R, END
 sBEST:
   DB B, E, S, T, SPC, END
+sSCORE:
+  DB S, C, O, R, E, END
+sHI:
+  DB H, I, END
+sHISC:
+  DB H, I, SPC, S, C, O, R, E, END
+sLIVES:
+  DB L, I, V, E, S, END
+sPAUSED:
+  DB P, A, U, S, E, D, END
+sCONT:
+  DB C, O, N, T, I, N, U, E, END
+sCREDITS:
+  DB C, R, E, D, I, T, S, END
 
 ; ---- art (examples/streetbrawl/gen_art.js) ----
 levels:                          ; NLEVELS x LEVELREC: 224-word sky, banks 1 (13 words), 2 + 10 (15 each)
