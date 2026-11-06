@@ -2,22 +2,32 @@
 ; STREET BRAWL — a Streets-of-Rage-style beat-'em-up prototype for CastlePalm
 ;
 ;   Walk your hero along a scrolling sidewalk (8-way, D-pad), throw punches (A),
-;   and clear the street of thugs. Enemies chase you, stagger and flash white when
+;   and clear the street of thugs. Punches that land chain into a combo: jab, jab,
+;   then a kick that knocks the thug off his feet. B jumps; A in the air is a flying
+;   kick. Walk into a thug to grab him: A knees him (the third knee floors him), B
+;   heaves him the way you hold, bowling over anyone he lands on. Floored thugs
+;   skid, lie still a moment and get back up; the beaten ones blink away.
+;   Each stage ends with its own boss (see "stage bosses"): Brick charges along his
+;   row, Viper hops out of reach and whistles up runners, Warden leaps and slams. Enemies chase you, stagger and flash white when
 ;   hit, and get knocked back; they square up, wind a punch back (the tell) and swing, and
 ;   only a landed punch costs health.
 ;   Three thug types mix in per wave (grunt / fast runner / tanky bruiser), driven
 ;   by the TYPE* stat tables + the wavedef spawn table. Clear a wave and the street
 ;   scrolls on; clear three waves and a boss to finish a stage, then an interstitial
-;   leads into the next of three stages. Clear the last boss to WIN, or run out of
-;   health for GAME OVER. Grab a lead pipe to hit harder and farther (limited
+;   leads into the next of three stages. Clear the last boss to WIN. Run out of
+;   health and you lose a life (3 per credit; getting back up floors the gang); out
+;   of lives, a 9..0 CONTINUE count lets Start replay the stage (3 continues, the
+;   score starts over) before GAME OVER. Hits, kills (by type), food, bosses and the
+;   health left at a stage's end score points; the high score lives in save RAM. Grab a lead pipe to hit harder and farther (limited
 ;   swings), and a drumstick to restore health.
 ;
 ;   Hits land with a brief hit-stop freeze and a camera shake for punch; a one-channel
 ;   chiptune riff loops on square-1 (SFX stay on square-0).
 ;
-;   Controls:  D-pad = move    A = punch / swing    Start = begin / restart
+;   Controls:  D-pad = move    A = punch / swing / knee    B = jump / throw
+;              Start = begin / restart, pause in play
 ;   Character creator (after the title): Up/Down pick a row, Left/Right change it,
-;   A throws a test punch, Start fights. The pick is kept in save RAM.
+;   A throws a test punch, B a test kick, Start fights. The pick is kept in save RAM.
 ;
 ;   Art: examples/streetbrawl/gen_art.js draws everything (street, skyline, 64x64 shaded
 ;   fighters, HUD font) and writes the blobs this cart INCBINs: tiles (DMA'd to VRAM),
@@ -59,10 +69,11 @@ SQ1_VOL    EQU $102006
 SQ1_CTRL   EQU $102007
 SAVECOMMIT EQU $100016    ; poke nonzero once save RAM holds a coherent record; host persists it
 
-; ---- cartridge save RAM ($200000-$207FFF): a per-browser best-kills high score ----
+; ---- cartridge save RAM ($200000-$207FFF): per-browser high score, best kills, fighter ----
 SV_MAG   EQU $200000      ; u16 marker word (SVMAGIC = a valid Street Brawl save)
 SV_BEST  EQU $200002      ; u16 best kills across runs
 SV_CHAR  EQU $200004      ; 6 bytes: the creator's picks (same order as c_body..)
+SV_HI    EQU $20000A      ; u16 high score (in tens: the HUD prints a trailing 0)
 SVMAGIC  EQU $B501        ; distinctive non-zero marker (fresh save RAM is all zeros)
 
 ; ---- input bits ----
@@ -71,6 +82,7 @@ DOWN  EQU 2
 LEFT  EQU 4
 RIGHT EQU 8
 ABTN  EQU 16
+BBTN  EQU 32
 START EQU 256
 
 ; ---- tile indices (must match T in examples/streetbrawl/gen_art.js) ----
@@ -95,6 +107,14 @@ GR_WIND  EQU 924        ; thug attack: wind-up (the telegraph), then the punch 6
 GR_PUNCH EQU 988
 BR_WIND  EQU 1052
 BR_PUNCH EQU 1116
+PL_KICK  EQU 1180       ; the hero's move frames: a second per-body block (see PLX_BYTES)
+PL_JUMP  EQU 1244
+PL_JKICK EQU 1308
+PL_GRAB  EQU 1372
+PL_KNEE  EQU 1436
+PL_THROW EQU 1500
+GR_HURT  EQU 1564       ; reeling: held in a grab, or getting back up
+BR_HURT  EQU 1628
 SOLID    EQU 16         ; 15 solid swatch cells: SOLID + k - 1 is filled with colour k
 ARROWL   EQU 91         ; font arrows for the creator
 ARROWR   EQU 92
@@ -113,9 +133,16 @@ SZ64     EQU $30
 ; ---- 64x64 fighter placement: feet sit at (px+8, py+16) ----
 FOFFX    EQU 24         ; sprite x = px - cam - FOFFX
 FOFFY    EQU 46         ; sprite y = py - FOFFY
-PL_BYTES EQU 12288      ; one selectable body: 6 frames x 64 tiles x 32 bytes (PL_WALK..PL_DOWN)
+PL_BYTES EQU 12288      ; first block of a body: 6 frames x 64 tiles x 32 bytes (PL_WALK..PL_DOWN)
+PLX_BYTES EQU 12288     ; second block: 6 move frames (PL_KICK..PL_THROW)
 NBODY    EQU 8
 PL_DST   EQU 4096       ; PL_WALK * 32: VRAM byte offset of the player's frames
+PLX_DST  EQU 37760      ; PL_KICK * 32: VRAM byte offset of the move frames
+PB6PAL   EQU 194        ; palette byte offset of bank 6 entry 1 (the boss)
+BRW_DST  EQU 22528      ; BR_WALK * 32  (VRAM byte offsets of the big-rig frames, for loadbr)
+BRD_DST  EQU 26624      ; BR_DOWN * 32
+BRWP_DST EQU 33664      ; BR_WIND * 32 (BR_PUNCH follows)
+BRH_DST  EQU 52096      ; BR_HURT * 32
 PB9PAL   EQU 290        ; palette byte offset of bank 9 entry 1 (PB_PLAYER*32 + 2)
 CP_HAIR  EQU 36         ; byte offsets into charpal: skin ramps (3 words) start at 0
 CP_TOP   EQU 68
@@ -139,6 +166,39 @@ LEVELREC EQU 534        ; bytes per stage record in levels.bin
 ; ---- tuning ----
 NENEM    EQU 8          ; enemy pool (on-screen slots); waves can fill up to this many
 ENHP     EQU 3
+; ---- the moveset ----
+COMBOWIN EQU 18         ; frames after a landed hit in which the next A chains the combo
+PUNCHRX  EQU 36         ; fist hitbox reaches this far in front of px
+KICKT    EQU 16         ; combo finisher (kick) length
+KICKHIT  EQU 10         ; its live frame
+KICKDMG  EQU 2
+KICKRX   EQU 8          ; extra reach of the kick
+JUMPV    EQU 6          ; take-off speed (px/frame up); gravity takes 1 every other frame
+JKDMG    EQU 2          ; flying kick
+JKRX     EQU 4          ; its extra reach
+JKHIGH   EQU 10         ; above this height thug punches pass under you
+GRABRX   EQU 18         ; walk into a thug this close (x, in front) ...
+GRABRY   EQU 6          ; ... on this row to grab him
+GRABDX   EQU 22         ; held thug sits this far in front
+GRABT    EQU 110        ; he struggles free after this long
+GRABCOOL EQU 30         ; no re-grab for this long after a release
+KNEET    EQU 14
+KNEEHIT  EQU 8
+KNEEDMG  EQU 1
+KNEEMAX  EQU 3          ; the third knee floors him
+THROWT   EQU 16
+THROWHIT EQU 9
+THROWDMG EQU 3          ; to the thrown thug, on landing
+BOWLDMG  EQU 2          ; to anyone the thrown body lands on
+THROWVX  EQU 4
+THROWVZ  EQU 3
+THROWZ   EQU 22         ; released at chest height
+KDVX     EQU 2          ; knockdown skid
+KDVZ     EQU 4
+DOWNT    EQU 50         ; lying on the street before getting up
+GETUPT   EQU 14         ; last frames of DOWNT show the reeling (getting-up) frame
+DIET     EQU 44         ; a beaten thug lies (blinking) this long, then he's gone
+KBF      EQU 4          ; a normal hit shoves the thug back only this many frames
 SPEED    EQU 2          ; player px / frame
 ESPD     EQU 1          ; enemy px / frame (slower, so you can juke them)
 PUNCHT   EQU 12         ; bare-fist swing length (frames)
@@ -151,7 +211,7 @@ WPNREACH EQU 14         ; extra hitbox reach while armed (px)
 WPNCOL   EQU 32         ; HUD column where the weapon pips start
 FOODHP   EQU 6          ; health restored by a food pickup
 PICKR    EQU 14         ; pickup grab radius (centre distance)
-KB       EQU 3          ; enemy knockback px / frame while staggered
+KB       EQU 1          ; enemy knockback px / frame for the first KBF frames of a stagger
 HITSTUN  EQU 18         ; enemy stagger frames after a hit
 INVULN   EQU 30         ; player i-frames after taking a hit
 ATKT     EQU 58         ; thug attack timer start: wind-up 57..45, punch 44..37, cooldown 36..1
@@ -163,6 +223,16 @@ ATKREACH EQU 32         ; how far in front the punch lands (px between logic box
 ATKHY    EQU 10         ; row tolerance for the punch to land
 ESTAND   EQU 20         ; thugs close to this x gap, not on top of the player
 HP0      EQU 16         ; starting health (= HP bar cells)
+; ---- score, lives, continues ----
+LIVES0   EQU 3          ; lives per credit
+CREDITS0 EQU 3          ; continues after the first credit runs out
+DEADT    EQU 80         ; frames the hero lies on the street when his health runs out
+RESPAWNI EQU 120        ; i-frames when he gets back up on a fresh life
+CONTT    EQU 600        ; continue countdown: 9..0, a digit a second
+PTS_HIT  EQU 1          ; scores are kept in tens: a landed hit is 10 points
+PTS_FOOD EQU 5
+PTS_BOSS EQU 500        ; a boss is 5000
+PTS_HPB  EQU 10         ; stage-clear bonus per health cell left (100 each)
 BANDTOP  EQU 112        ; player/enemy vertical play band (py range; feet = py+16, on the sidewalk/road)
 BANDBOT  EQU 190
 XMIN     EQU 16
@@ -173,8 +243,28 @@ WAVEN    EQU 3          ; thugs on screen per normal wave (must be <= NENEM)
 SEG      EQU 200        ; camera advance per wave (world px)
 NLEVELS  EQU 3          ; number of stages
 NORMW    EQU 3          ; normal waves per level before the boss (boss = wave NORMW)
-BOSSHP   EQU 18         ; boss hit points
-BOSSBAR  EQU 18         ; boss HP-bar cells (== BOSSHP, so no scaling math)
+BOSSBAR  EQU 18         ; boss HP-bar cells (the bar scales to the boss's health)
+; ---- stage bosses (kind = stage): tuning for their special moves ----
+BOSSCOOL0 EQU 100       ; frames before a boss's first special
+BRICKREV EQU 36         ; Brick revs up (flashing) this long ...
+BRICKV   EQU 5          ; ... charges at this speed ...
+BRICKRUN EQU 80         ; ... for at most this long ...
+BRICKDMG EQU 3          ; ... hurting this much if he runs you over ...
+BRICKDAZE EQU 70        ; ... then stands dazed this long after the crash
+BRICKCOOL EQU 170
+BRICKBACK EQU 50        ; when you're close he first backs off this long (at most) ...
+BRICKBACKV EQU 2        ; ... at this speed
+VIPHOPX  EQU 3          ; Viper's hop back: px/frame ...
+VIPHOPV  EQU 5          ; ... and take-off speed
+VIPCOOL  EQU 70
+VIPTH1   EQU 16         ; health at which Viper whistles up runners (twice)
+VIPTH2   EQU 8
+WARDCROUCH EQU 26       ; Warden crouches (flashing) this long ...
+WARDLEAP EQU 16         ; ... is in the air this long ...
+WARDWAVE EQU 46         ; ... and his landing hurts within this x range ...
+WARDDMG  EQU 3
+WARDREC  EQU 40         ; ... then gets his breath back
+WARDCOOL EQU 160
 INTERT   EQU 150        ; interstitial duration (frames)
 CLRPAUSE EQU 110        ; quiet beat after a boss falls, before the next screen
 EHOLD0   EQU 80         ; freeze the first wave this long so it doesn't rush you
@@ -195,7 +285,7 @@ HSKILL   EQU 4          ; freeze frames on a kill
 NOTELEN  EQU 9          ; frames each note is held (tempo)
 
 ; ---- RAM ----
-state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over, 4 interstitial, 5 creator
+state    EQU $000100    ; 0 title, 1 play, 2 win, 3 over, 4 interstitial, 5 creator, 6 continue
 in_now   EQU $000104
 in_prev  EQU $000106
 sfxT     EQU $000108
@@ -232,6 +322,34 @@ wframe   EQU $00016A    ; frame counter latched by the main loop's wait
 c_sel    EQU $00016C    ; creator: selected row (0..CROWS-1)
 c_edge   EQU $00016E    ; creator: buttons newly pressed this frame
 c_body   EQU $000170    ; creator picks, one byte each: body, skin, hair, top, legs, shoes
+p_jz     EQU $000176    ; height above the street (0 = grounded)
+p_jvz    EQU $000178    ; vertical speed while airborne (+ = up)
+p_combo  EQU $00017A    ; combo step: 0, 1 jabs; 2 = the next A is the kick
+p_chain  EQU $00017C    ; frames left to chain the next hit
+p_hitany EQU $00017E    ; the current swing connected
+p_atk    EQU $000180    ; current attack: 0 jab, 1 kick, 2 pipe, 3 knee, 4 throw, 5 flying kick
+p_grab   EQU $000182    ; held thug's slot + 1 (0 = hands free)
+p_gtime  EQU $000184    ; grab time left
+p_gknee  EQU $000186    ; knees landed in this grab
+p_gcool  EQU $000188    ; re-grab cooldown
+p_jkick  EQU $00018A    ; flying kick out (until landing)
+p_kd     EQU $00018C    ; scratch: this hit knocks down
+b_kind   EQU $000190    ; boss: which one (= stage)
+b_mode   EQU $000192    ; 0 normal AI, else the special move's phase
+b_tmr    EQU $000194
+b_cool   EQU $000196    ; frames until the next special
+b_vx     EQU $000198
+b_vy     EQU $00019A    ; (Viper: hop speed; Warden: leap dy)
+b_frame  EQU $00019C    ; 0 normal frames, 1 wind-up, 2 punch, 3 reeling
+b_flash  EQU $00019E    ; nonzero: flash the telegraph this frame (bit 2 used)
+b_calls  EQU $0001A0    ; Viper: runners called so far
+score    EQU $0001A2    ; this credit's score, in tens (saturates at 65535)
+hiscore  EQU $0001A4    ; best score, in tens (save RAM; climbs live as you beat it)
+lives    EQU $0001A6    ; lives left, counting the one in play
+credits  EQU $0001A8    ; continues left
+paused   EQU $0001AA    ; 1 while play is paused (Start toggles)
+p_dead   EQU $0001AC    ; frames left lying down after the health bar ran out
+contT    EQU $0001AE    ; continue countdown (state 6)
 CHARPAL  EQU $000600    ; 15 words: the player's bank, assembled from the picks
 SKYTAB   EQU $000400    ; 224 RGB555 words: this stage's sky, one per scanline (hblank reads it)
 hbx0     EQU $000130    ; punch hitbox (computed each swing)
@@ -245,6 +363,13 @@ EATK     EQU $000250    ; parallel array: attack timer per enemy slot (0 = idle,
 NPICK    EQU 4          ; max pickups live at once
 PICKUP   EQU $000260    ; NPICK slots x 8 bytes
 ;   +0 type (0 none, 1 pipe, 2 food)  +2 px(u16)  +4 py(u16)
+EX       EQU $000300    ; NENEM slots x 16 bytes: knockdown / grab physics (A3 points here)
+;   +0 st (0 normal, 1 held, 2 airborne, 3 down)  +1 timer (down)  +2 z(u16, height)
+;   +4 vz(s16)  +6 vx(s16)  +8 thrown  +9 hit by this flying kick  +10 damage on landing
+;   +11 dying (beaten: blinks out at the end of the down timer)
+ST_HELD  EQU 1
+ST_AIR   EQU 2
+ST_DOWN  EQU 3
 
 ; ---- text codes (print maps 0..25 -> letters, 26 -> space, $FF -> end) ----
 A EQU 0
@@ -296,6 +421,7 @@ start:
   STW R0, [hitstop]
   STW R0, [mIdx]           ; start the music loop from the top
   STW R0, [mT]
+  STW R0, [paused]
   CALL loadsave            ; restore best-kills from cartridge save RAM (0 if none)
   CALL loadchar            ; and the saved fighter (body tiles + player bank)
   CALL drawtitle
@@ -314,7 +440,12 @@ mainloop:
   BEQ ml_inter
   CMP R0, #5
   BEQ ml_create
+  CMP R0, #6
+  BEQ ml_cont
   CALL menuframe
+  BRA ml_wait
+ml_cont:
+  CALL contframe
   BRA ml_wait
 ml_play:
   CALL playframe
@@ -326,7 +457,11 @@ ml_create:
   CALL creatorframe
 ml_wait:
   CALL sfxtick
+  LDW R0, [paused]         ; the music holds while paused
+  CMP R0, #0
+  BNE ml_quiet
   CALL musictick
+ml_quiet:
   LDW R0, [FRAMECTR]       ; hblank IRQs also wake WAIT: sleep until the frame counter moves
   STW R0, [wframe]
 ml_sleep:
@@ -404,6 +539,19 @@ mf_done:
 
 ; ============================ one play frame ============================
 playframe:
+  LDW R0, [in_now]         ; Start (edge) pauses / resumes
+  AND R0, #START
+  BEQ pf_np
+  LDW R0, [in_prev]
+  AND R0, #START
+  BNE pf_np
+  CALL togglepause
+pf_np:
+  LDW R0, [paused]
+  CMP R0, #0
+  BEQ pf_go
+  RET                      ; paused: the scene (and its OAM) holds
+pf_go:
   LDW R0, [hitstop]        ; hit-freeze: hold the whole scene for a few frames
   CMP R0, #0
   BEQ pf_run
@@ -414,10 +562,19 @@ pf_run:
   LDW R0, [gtick]          ; free-running tick (half-speed bruisers key off it)
   ADD R0, #1
   STW R0, [gtick]
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_down
   CALL domove
-  CALL punchupdate
+  CALL jumpupdate
+  CALL attackupdate
   CALL doenemies
   CALL dopickups
+  BRA pf_tick
+pf_down:
+  CALL jumpupdate          ; knocked out: he still falls if he was in the air
+  CALL doenemies           ; and the gang keeps moving
+pf_tick:
   LDW R0, [p_hurt]         ; tick i-frames
   CMP R0, #0
   BEQ pf_nh
@@ -432,20 +589,30 @@ pf_nh:
   BEQ pf_nbb
   CALL drawbosshp
 pf_nbb:
+  CALL drawscore
   CALL buildoam
-  LDW R0, [p_hp]           ; dead?
+  LDW R0, [p_hp]           ; out of health?
   CMP R0, #0
   BNE pf_ckwin
-  MOV R0, #3
-  STW R0, [state]
-  CALL savebest            ; commit a new best-kills if this run beat it
-  CALL clearoam
-  CALL drawover
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_dying
+  CALL playerdown          ; he hits the street
+  RET
+pf_dying:
+  SUB R0, #1
+  STW R0, [p_dead]
+  CMP R0, #0
+  BNE pf_ret
+  CALL lostlife            ; next life, the continue screen, or game over
+pf_ret:
   RET
 pf_ckwin:
   CALL countalive          ; current wave cleared?
   CMP R0, #0
-  BNE pf_done
+  BEQ pf_clr
+  RET
+pf_clr:
   LDW R0, [wave]           ; was it the boss wave?
   CMP R0, #NORMW
   BLT pf_adv               ; normal wave -> next wave, same level
@@ -454,6 +621,10 @@ pf_ckwin:
   BNE pf_pausetick
   MOV R0, #CLRPAUSE        ; first frame the boss is down: start the pause
   STW R0, [clrpause]
+  LDW R0, [p_hp]           ; stage-clear bonus for the health you kept
+  MOV R1, #PTS_HPB
+  MULU R0, R1
+  CALL addscore
   RET
 pf_pausetick:
   SUB R0, #1
@@ -500,6 +671,14 @@ if_done:
 
 ; ============================ player movement ============================
 domove:
+  LDW R0, [p_grab]         ; holding a thug: feet planted
+  CMP R0, #0
+  BEQ dm_free
+  RET
+dm_free:
+  LDW R7, [p_jz]           ; R7 != 0 while airborne: no stepping up/down the street
+  LDW R0, [p_jvz]
+  OR R7, R0
   MOV R4, #0               ; "moved" flag
   LDW R6, [in_now]
   LDW R0, [p_x]
@@ -520,6 +699,8 @@ dm_r:
   MOV R3, #0
   STW R3, [p_face]
 dm_u:
+  CMP R7, #0
+  BNE dm_clx
   MOV R2, R6
   AND R2, #UP
   BEQ dm_d
@@ -552,70 +733,498 @@ dm_store:
 dm_done:
   RET
 
-; ============================ punching ============================
-punchupdate:
-  LDW R0, [in_now]
-  MOV R1, R0
-  AND R1, #ABTN
-  BEQ pu_tick
-  LDW R2, [in_prev]
-  AND R2, #ABTN
-  BNE pu_tick             ; A held since last frame -> not an edge
+; ============================ the moveset ============================
+; A on the ground: jab, jab, kick. A landed jab opens a COMBOWIN window for the
+; next A; the third hit is the kick, which floors the thug. B jumps; A in the air
+; puts out a flying kick until you land. Walk into a thug to grab him: A knees,
+; B throws (the way you hold). Knocked-down thugs are run by eair / edown below.
+
+; ---- jumpupdate: rise and fall; gravity takes 1 px/frame every other frame ----
+jumpupdate:
+  LDW R0, [p_jz]
+  LDW R1, [p_jvz]
+  MOV R2, R0
+  OR R2, R1
+  BEQ ju_done              ; on the ground
+  ADD R0, R1
+  LDW R2, [gtick]
+  AND R2, #1
+  BEQ ju_g
+  SUB R1, #1
+ju_g:
+  CMP R0, #0
+  BGT ju_store
+  MOV R0, #0               ; landed
+  STW R0, [p_jz]
+  STW R0, [p_jvz]
+  STW R0, [p_jkick]
+  STW R0, [p_combo]
+  MOV R0, #380
+  CALL sfxblip
+  RET
+ju_store:
+  STW R0, [p_jz]
+  STW R1, [p_jvz]
+ju_done:
+  RET
+
+; ---- attackupdate: read A/B and run the current move ----
+attackupdate:
+  LDW R0, [in_prev]        ; R5 = buttons newly pressed this frame (kept through)
+  NOT R0
+  LDW R5, [in_now]
+  AND R5, R0
+  LDW R0, [p_gcool]
+  CMP R0, #0
+  BEQ au_gc
+  SUB R0, #1
+  STW R0, [p_gcool]
+au_gc:
+  LDW R0, [p_chain]
+  CMP R0, #0
+  BEQ au_ch
+  SUB R0, #1
+  STW R0, [p_chain]
+au_ch:
+  LDW R0, [p_grab]
+  CMP R0, #0
+  BEQ au_free
+  BRA grabupdate
+au_free:
+  LDW R0, [p_jz]
+  LDW R1, [p_jvz]
+  OR R0, R1
+  BEQ au_ground
+  MOV R0, R5               ; airborne: A puts out the flying kick (once a jump)
+  AND R0, #ABTN
+  BEQ au_air
+  LDW R0, [p_jkick]
+  CMP R0, #0
+  BNE au_air
+  MOV R0, #1
+  STW R0, [p_jkick]
+  MOV R0, #5
+  STW R0, [p_atk]
+  CALL clearhitf
+  MOV R0, #170
+  CALL sfxblip
+au_air:
+  LDW R0, [p_jkick]
+  CMP R0, #0
+  BEQ au_air2
+  CALL checkhit            ; live every frame of the kick; each thug is hit once
+au_air2:
+  BRA au_tick
+au_ground:
   LDW R0, [p_punch]
   CMP R0, #0
-  BNE pu_tick             ; already mid-swing
-  LDW R0, [p_weapon]      ; armed? -> pipe swing
+  BEQ au_new
+  BRA au_tick              ; mid-swing: no new move yet
+au_new:
+  MOV R0, R5
+  AND R0, #BBTN
+  BEQ au_grab
+  MOV R0, #JUMPV           ; B: jump
+  STW R0, [p_jvz]
+  MOV R0, #0
+  STW R0, [p_combo]
+  STW R0, [p_jkick]
+  MOV R0, #300
+  CALL sfxblip
+  RET
+au_grab:
+  CALL trygrab             ; walking into a thug grabs him
+  LDW R0, [p_grab]
   CMP R0, #0
-  BEQ pu_fist
+  BEQ au_a
+  RET
+au_a:
+  MOV R0, R5
+  AND R0, #ABTN
+  BNE au_a2
+  BRA au_tick
+au_a2:
+  LDW R0, [p_weapon]       ; armed? -> pipe swing (no combo, but it hurts)
+  CMP R0, #0
+  BEQ au_fist
   SUB R0, #1
-  STW R0, [p_weapon]      ; spend one swing
+  STW R0, [p_weapon]       ; spend one swing
   MOV R0, #1
   STW R0, [p_wswing]
+  MOV R0, #2
+  STW R0, [p_atk]
+  MOV R0, #0
+  STW R0, [p_hitany]
   MOV R0, #WPNT
   STW R0, [p_punch]
-  MOV R0, #150            ; pipe whoosh (lower pitch)
+  MOV R0, #150             ; pipe whoosh (lower pitch)
   CALL sfxblip
-  BRA pu_tick
-pu_fist:
+  BRA au_tick
+au_fist:
   MOV R0, #0
   STW R0, [p_wswing]
+  STW R0, [p_hitany]
+  LDW R0, [p_chain]        ; outside the chain window -> back to the first jab
+  CMP R0, #0
+  BNE au_chain
+  STW R0, [p_combo]
+au_chain:
+  LDW R0, [p_combo]
+  CMP R0, #2
+  BLT au_jab
+  MOV R0, #1               ; third hit: the kick
+  STW R0, [p_atk]
+  MOV R0, #KICKT
+  STW R0, [p_punch]
+  MOV R0, #160
+  CALL sfxblip
+  BRA au_tick
+au_jab:
+  MOV R0, #0
+  STW R0, [p_atk]
   MOV R0, #PUNCHT
   STW R0, [p_punch]
   MOV R0, #180
   CALL sfxblip
-pu_tick:
+au_tick:
   LDW R0, [p_punch]
   CMP R0, #0
-  BEQ pu_done
+  BEQ au_done
   SUB R0, #1
   STW R0, [p_punch]
-  CMP R0, #PUNCHHIT        ; fist is live for exactly one frame
-  BNE pu_done
+  CMP R0, #0
+  BEQ au_end
+  LDW R2, [p_atk]
+  CMP R2, #3               ; knee / throw / flying kick land elsewhere
+  BGE au_done
+  MOV R1, #PUNCHHIT        ; the single live frame: jab / pipe ...
+  CMP R2, #1
+  BNE au_live
+  MOV R1, #KICKHIT         ; ... or kick
+au_live:
+  CMP R0, R1
+  BNE au_done
   CALL checkhit
-pu_done:
+  RET
+au_end:                    ; swing over: a jab that landed moves the combo on
+  LDW R2, [p_atk]
+  CMP R2, #0
+  BNE au_reset
+  LDW R0, [p_hitany]
+  CMP R0, #0
+  BEQ au_reset
+  LDW R0, [p_combo]
+  ADD R0, #1
+  STW R0, [p_combo]
+  MOV R0, #COMBOWIN
+  STW R0, [p_chain]
+  RET
+au_reset:
+  MOV R0, #0
+  STW R0, [p_combo]
+  STW R0, [p_chain]
+au_done:
   RET
 
-; ---- build the strike hitbox in front of the player, damage any thug inside ----
-checkhit:
-  LDW R0, [p_wswing]     ; pick damage + reach bonus for this swing
+; ---- slotptrs(R7=slot): A1 = &ENEMY[slot], A3 = &EX[slot]. Scratches R3. ----
+slotptrs:
+  MOV R3, R7
+  SHL R3, #3
+  LDA A1, #ENEMY
+  ADD A1, R3
+  MOV R3, R7
+  SHL R3, #4
+  LDA A3, #EX
+  ADD A3, R3
+  RET
+
+; ---- trygrab: walking into a thug on your row, close in front, grabs him.
+;      Not the boss, not a thug reeling from a hit. Keeps R5. ----
+trygrab:
+  LDW R0, [p_gcool]
   CMP R0, #0
-  BEQ ch_fist
-  MOV R0, #WPNDMG
+  BEQ tg_c
+  RET
+tg_c:
+  LDW R6, [in_now]         ; walking toward the way you face?
+  MOV R1, #RIGHT
+  LDW R0, [p_face]
+  CMP R0, #0
+  BEQ tg_dir
+  MOV R1, #LEFT
+tg_dir:
+  AND R6, R1
+  BNE tg_go
+  RET
+tg_go:
+  MOV R7, #0
+tg_lp:
+  CALL slotptrs
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ tg_next
+  CMP R7, #0               ; the boss can't be grabbed (Viper's runners can)
+  BNE tg_nb
+  LDW R0, [bossactive]
+  CMP R0, #0
+  BNE tg_next
+tg_nb:
+  LDB R0, [A3+#0]          ; on his feet ...
+  CMP R0, #0
+  BNE tg_next
+  LDB R0, [A1+#2]          ; ... and not reeling
+  CMP R0, #0
+  BNE tg_next
+  LDW R0, [A1+#6]
+  LDW R1, [p_y]
+  SUB R0, R1
+  CALL absr0
+  CMP R0, #GRABRY
+  BGT tg_next
+  LDW R0, [A1+#4]          ; d = how far in front of you
+  LDW R1, [p_x]
+  SUB R0, R1
+  LDW R1, [p_face]
+  CMP R1, #0
+  BEQ tg_fw
+  NEG R0
+tg_fw:
+  CMP R0, #0
+  BLT tg_next
+  CMP R0, #GRABRX
+  BLE tg_take
+tg_next:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT tg_lp
+  RET
+tg_take:
+  MOV R0, #ST_HELD
+  STB R0, [A3+#0]
+  MOV R0, R7
+  ADD R0, #1
+  STW R0, [p_grab]
+  MOV R0, #GRABT
+  STW R0, [p_gtime]
+  MOV R0, #0
+  STW R0, [p_gknee]
+  STW R0, [p_combo]
+  STW R0, [p_wswing]
+  LDA A2, #EATK            ; his swing is cut off
+  ADD A2, R7
+  STB R0, [A2]
+  MOV R0, #220
+  CALL sfxblip
+  RET
+
+; ---- grabupdate(R5=new buttons): hold, knee (A), throw (B); he breaks free in time ----
+grabupdate:
+  LDW R7, [p_grab]
+  SUB R7, #1
+  CALL slotptrs
+  LDB R0, [A1+#0]          ; floored or gone -> hands free
+  CMP R0, #0
+  BEQ gu_free
+  LDB R0, [A3+#0]
+  CMP R0, #ST_HELD
+  BEQ gu_hold
+gu_free:
+  MOV R0, #0
+  STW R0, [p_grab]
+  MOV R0, #GRABCOOL
+  STW R0, [p_gcool]
+  RET
+gu_hold:
+  LDW R0, [p_punch]        ; mid-knee / mid-throw?
+  CMP R0, #0
+  BEQ gu_input
+  SUB R0, #1
+  STW R0, [p_punch]
+  LDW R1, [p_atk]
+  CMP R1, #4
+  BEQ gu_thr
+  CMP R0, #KNEEHIT
+  BNE gu_pinj
+  CALL kneehit
+gu_pinj:
+  BRA gu_pin
+gu_thr:
+  CMP R0, #THROWHIT
+  BNE gu_pin
+  BRA dothrow
+gu_input:
+  LDW R0, [p_gtime]        ; he struggles free in the end
+  SUB R0, #1
+  STW R0, [p_gtime]
+  BNE gu_ia
+  STB R0, [A3+#0]          ; (R0 = 0) back on his feet
+  BRA gu_free
+gu_ia:
+  MOV R0, R5
+  AND R0, #ABTN
+  BEQ gu_ib
+  MOV R0, #3               ; A: knee
+  STW R0, [p_atk]
+  MOV R0, #KNEET
+  STW R0, [p_punch]
+  MOV R0, #200
+  CALL sfxblip
+  BRA gu_pin
+gu_ib:
+  MOV R0, R5
+  AND R0, #BBTN
+  BEQ gu_pin
+  LDW R0, [in_now]         ; B: throw the way you hold (or the way you face)
+  MOV R1, R0
+  AND R1, #LEFT
+  BEQ gu_tr
+  MOV R1, #1
+  STW R1, [p_face]
+gu_tr:
+  AND R0, #RIGHT
+  BEQ gu_tgo
+  MOV R1, #0
+  STW R1, [p_face]
+gu_tgo:
+  MOV R0, #4
+  STW R0, [p_atk]
+  MOV R0, #THROWT
+  STW R0, [p_punch]
+  MOV R0, #140
+  CALL sfxblip
+gu_pin:                    ; keep him in front of you, facing you
+  LDW R0, [p_x]
+  LDW R1, [p_face]
+  CMP R1, #0
+  BEQ gu_pr
+  SUB R0, #GRABDX
+  BRA gu_px
+gu_pr:
+  ADD R0, #GRABDX
+gu_px:
+  CMP R0, #XMIN
+  BGE gu_px2
+  MOV R0, #XMIN
+gu_px2:
+  CMP R0, #EXMAX
+  BLE gu_px3
+  MOV R0, #EXMAX
+gu_px3:
+  STW R0, [A1+#4]
+  LDW R0, [p_y]
+  STW R0, [A1+#6]
+  LDW R0, [p_face]         ; faceRight == your facing: he looks at you
+  STB R0, [A1+#3]
+  RET
+
+; ---- kneehit(A1,A3): a knee to the held thug; the KNEEMAX-th floors him ----
+kneehit:
+  MOV R0, #KNEEDMG
   STB R0, [p_dmg]
-  MOV R2, #WPNREACH
-  BRA ch_box
-ch_fist:
-  MOV R0, #FISTDMG
-  STB R0, [p_dmg]
+  LDW R0, [p_gknee]
+  ADD R0, #1
+  STW R0, [p_gknee]
+  MOV R1, #0
+  CMP R0, #KNEEMAX
+  BLT kh_kd
+  MOV R1, #1
+kh_kd:
+  STW R1, [p_kd]
+  MOV R0, #2
+  STW R0, [hitstop]
+  CALL enemyhit
+  RET
+
+; ---- dothrow(A1,A3): let go: he flies the way you face and lands hard ----
+dothrow:
+  MOV R0, #ST_AIR
+  STB R0, [A3+#0]
+  MOV R0, #1
+  STB R0, [A3+#8]          ; thrown: bowls over whoever he lands on
+  MOV R0, #THROWDMG
+  STB R0, [A3+#10]         ; damage when he hits the street
+  MOV R0, #THROWZ
+  STW R0, [A3+#2]
+  MOV R0, #THROWVZ
+  STW R0, [A3+#4]
+  MOV R0, #THROWVX
+  LDW R1, [p_face]
+  CMP R1, #0
+  BEQ dt_r
+  NEG R0
+dt_r:
+  STW R0, [A3+#6]
+  MOV R0, #0
+  STW R0, [p_grab]
+  MOV R0, #GRABCOOL
+  STW R0, [p_gcool]
+  MOV R0, #SHAKEW
+  STW R0, [shakeT]
+  MOV R0, #110
+  CALL sfxblip
+  RET
+
+; ---- clearhitf: a new flying kick may hit every thug once ----
+clearhitf:
+  LDA A0, #EX+9
+  MOV R1, #NENEM
+  MOV R0, #0
+chf_lp:
+  STB R0, [A0]
+  ADD A0, #16
+  SUB R1, #1
+  BNE chf_lp
+  RET
+
+; ---- exclear(R7=slot): zero the slot's EX record (on his feet, no motion) ----
+exclear:
+  MOV R3, R7
+  SHL R3, #4
+  LDA A3, #EX
+  ADD A3, R3
+  MOV R0, #0
+  STW R0, [A3+#0]
+  STW R0, [A3+#2]
+  STW R0, [A3+#4]
+  STW R0, [A3+#6]
+  STW R0, [A3+#8]
+  STW R0, [A3+#10]
+  STB R7, [A3+#12]         ; which slot this is (launch spots the boss by it)
+  RET
+
+; ---- checkhit: the strike box in front of you hits every standing thug inside.
+;      Damage, reach and knockdown come from the attack (p_atk). ----
+checkhit:
+  LDW R1, [p_atk]
+  MOV R0, #FISTDMG         ; jab
   MOV R2, #0
-ch_box:
+  MOV R3, #0
+  CMP R1, #1
+  BNE ch_nk
+  MOV R0, #KICKDMG         ; kick: further, and floors him
+  MOV R2, #KICKRX
+  MOV R3, #1
+ch_nk:
+  CMP R1, #2
+  BNE ch_np
+  MOV R0, #WPNDMG          ; pipe
+  MOV R2, #WPNREACH
+ch_np:
+  CMP R1, #5
+  BNE ch_set
+  MOV R0, #JKDMG           ; flying kick: floors him
+  MOV R2, #JKRX
+  MOV R3, #1
+ch_set:
+  STB R0, [p_dmg]
+  STW R3, [p_kd]
   LDW R0, [p_x]
   LDW R1, [p_face]
   AND R1, #1
   BEQ ch_right
   MOV R4, R0              ; facing left: box covers body + reach to the left
-  SUB R4, #14
-  SUB R4, R2             ; + weapon reach
+  SUB R4, #PUNCHRX-16
+  SUB R4, R2
   MOV R5, R0
   ADD R5, #20
   BRA ch_y
@@ -623,8 +1232,8 @@ ch_right:
   MOV R4, R0             ; facing right: box covers body + reach to the right
   SUB R4, #4
   MOV R5, R0
-  ADD R5, #30
-  ADD R5, R2            ; + weapon reach
+  ADD R5, #PUNCHRX
+  ADD R5, R2
 ch_y:
   STW R4, [hbx0]
   STW R5, [hbx1]
@@ -636,16 +1245,16 @@ ch_y:
   STW R0, [hby1]
   MOV R7, #0             ; enemy index
 ch_lp:
-  MOV R3, R7
-  SHL R3, #3
-  LDA A1, #ENEMY
-  ADD A1, R3
+  CALL slotptrs
   LDB R0, [A1+#0]
   CMP R0, #0
   BEQ ch_next
-  LDB R0, [A1+#2]        ; already staggered -> don't double-hit
+  LDB R0, [A3+#0]        ; only thugs on their feet ...
   CMP R0, #0
   BNE ch_next
+  LDW R0, [A3+#2]        ; ... and not up in the air (a hopping / leaping boss)
+  CMP R0, #16
+  BGT ch_next
   LDW R0, [A1+#4]        ; enemy centre x = ex+8
   ADD R0, #8
   LDW R1, [hbx0]
@@ -662,16 +1271,30 @@ ch_lp:
   LDW R1, [hby1]
   CMP R0, R1
   BGT ch_next
+  LDW R0, [p_atk]        ; a flying kick hits each thug once
+  CMP R0, #5
+  BNE ch_hit
+  LDB R0, [A3+#9]
+  CMP R0, #0
+  BNE ch_next
+  MOV R0, #1
+  STB R0, [A3+#9]
+ch_hit:
+  MOV R0, #1
+  STW R0, [p_hitany]
   PUSH R7
   CALL enemyhit
   POP R7
 ch_next:
   ADD R7, #1
   CMP R7, #NENEM
-  BLT ch_lp
+  BGE ch_ret
+  BRA ch_lp
+ch_ret:
   RET
 
-; ---- enemyhit(A1=slot): -p_dmg hp, stagger, die if drained ----
+; ---- enemyhit(A1=slot, A3=EX): -p_dmg hp, stagger; a knockdown hit (p_kd) or
+;      the last point of health sends him flying ----
 enemyhit:
   LDB R0, [A1+#1]
   LDB R1, [p_dmg]
@@ -681,6 +1304,10 @@ enemyhit:
   MOV R0, #0
 eh_set:
   STB R0, [A1+#1]
+  PUSH R0
+  MOV R0, #PTS_HIT         ; every landed hit scores
+  CALL addscore
+  POP R0
   MOV R1, #HITSTUN
   STB R1, [A1+#2]
   LDW R1, [p_wswing]     ; pipe hits land with a brief freeze; fists don't
@@ -694,9 +1321,37 @@ eh_snd:
   CALL sfxblip
   POP R0
   CMP R0, #0
+  BEQ eh_kill
+  LDW R1, [p_kd]
+  CMP R1, #0
+  BEQ eh_done
+  LDW R1, [p_atk]        ; a boss shrugs off the combo kick (it still hurts)
+  CMP R1, #1
+  BNE eh_kd
+  LDB R1, [A3+#12]
+  CMP R1, #0
+  BNE eh_kd
+  LDW R1, [bossactive]
+  CMP R1, #0
   BNE eh_done
-  MOV R1, #0
-  STB R1, [A1+#0]         ; dead
+eh_kd:
+  CALL launch            ; floored
+  MOV R1, #HITSTOP
+  STW R1, [hitstop]
+  MOV R0, #100
+  CALL sfxblip
+eh_done:
+  RET
+eh_kill:
+  CALL launch
+  CALL ekill
+  RET
+
+; ---- ekill(A1,A3): he's beaten: count it, juice it; he blinks out once he's down ----
+ekill:
+  CALL killscore
+  MOV R1, #1
+  STB R1, [A3+#11]
   LDW R1, [kills]
   ADD R1, #1
   STW R1, [kills]
@@ -706,7 +1361,198 @@ eh_snd:
   STW R1, [shakeT]
   MOV R0, #90
   CALL sfxblip
-eh_done:
+  RET
+
+; ---- launch(A1,A3): knocked off his feet, away from you ----
+launch:
+  MOV R0, #ST_AIR
+  STB R0, [A3+#0]
+  MOV R0, #0
+  STW R0, [A3+#2]          ; z
+  STB R0, [A3+#8]          ; not thrown
+  MOV R0, #KDVZ
+  STW R0, [A3+#4]
+  MOV R0, #KDVX
+  LDW R1, [A1+#4]
+  LDW R2, [p_x]
+  CMP R1, R2
+  BGE ln_r
+  NEG R0
+ln_r:
+  STW R0, [A3+#6]
+  MOV R0, #8               ; a short flash as he goes
+  STB R0, [A1+#2]
+  LDB R0, [A3+#12]         ; a floored boss drops whatever special he was doing
+  CMP R0, #0
+  BNE ln_done
+  LDW R0, [bossactive]
+  CMP R0, #0
+  BEQ ln_done
+  MOV R0, #0
+  STW R0, [b_mode]
+  STW R0, [b_frame]
+  LDW R0, [b_cool]         ; and gives you a moment before the next one
+  CMP R0, #60
+  BGE ln_done
+  MOV R0, #60
+  STW R0, [b_cool]
+ln_done:
+  RET
+
+; ---- eair(A1,A3): a thug in the air: skid, arc, land; a thrown one bowls others over ----
+eair:
+  LDB R0, [A1+#2]          ; run out the hit flash
+  CMP R0, #0
+  BEQ ear_f
+  SUB R0, #1
+  STB R0, [A1+#2]
+ear_f:
+  LDW R4, [A1+#4]
+  LDW R0, [A3+#6]
+  ADD R4, R0
+  CMP R4, #XMIN
+  BGE ear_x1
+  MOV R4, #XMIN
+ear_x1:
+  CMP R4, #EXMAX
+  BLE ear_x2
+  MOV R4, #EXMAX
+ear_x2:
+  STW R4, [A1+#4]
+  LDW R0, [A3+#2]          ; z += vz, gravity every other frame
+  LDW R1, [A3+#4]
+  ADD R0, R1
+  LDW R2, [gtick]
+  AND R2, #1
+  BEQ ear_g
+  SUB R1, #1
+ear_g:
+  STW R1, [A3+#4]
+  STW R0, [A3+#2]
+  LDB R2, [A3+#8]
+  CMP R2, #0
+  BEQ ear_land
+  PUSH R0
+  CALL bowl
+  POP R0
+ear_land:
+  CMP R0, #0
+  BLE ear_down
+  RET
+ear_down:
+  MOV R0, #0               ; on the street: lie there
+  STW R0, [A3+#2]
+  STW R0, [A3+#4]
+  STB R0, [A3+#8]
+  MOV R0, #ST_DOWN
+  STB R0, [A3+#0]
+  MOV R0, #DOWNT
+  STB R0, [A3+#1]
+  LDB R0, [A3+#10]         ; a throw hurts on landing
+  CMP R0, #0
+  BEQ ear_thud
+  MOV R1, #0
+  STB R1, [A3+#10]
+  LDB R1, [A3+#11]
+  CMP R1, #0
+  BNE ear_thud
+  LDB R1, [A1+#1]
+  SUB R1, R0
+  CMP R1, #0
+  BGT ear_hp
+  MOV R1, #0
+  STB R1, [A1+#1]
+  CALL ekill
+  BRA ear_thud
+ear_hp:
+  STB R1, [A1+#1]
+ear_thud:
+  LDB R0, [A3+#11]         ; beaten: blink out sooner
+  CMP R0, #0
+  BEQ ear_sfx
+  MOV R0, #DIET
+  STB R0, [A3+#1]
+ear_sfx:
+  MOV R0, #4
+  STW R0, [shakeT]
+  MOV R0, #420             ; thud
+  CALL sfxblip
+  RET
+
+; ---- edown(A1,A3): count down on the floor; get up (or, beaten, vanish) ----
+edown:
+  LDB R0, [A3+#1]
+  SUB R0, #1
+  STB R0, [A3+#1]
+  CMP R0, #0
+  BEQ ed_up
+  RET
+ed_up:
+  LDB R0, [A3+#11]
+  CMP R0, #0
+  BEQ ed_rise
+  MOV R0, #0               ; gone
+  STB R0, [A1+#0]
+  STB R0, [A3+#0]
+  RET
+ed_rise:
+  MOV R0, #0               ; back on his feet ...
+  STB R0, [A3+#0]
+  STB R0, [A1+#2]
+  CALL atkptr
+  MOV R0, #ATKCD           ; ... and a beat before he can swing again
+  STB R0, [A2]
+  RET
+
+; ---- bowl(A1,A3 = the thrown thug): floor every standing thug he lands on ----
+bowl:
+  LDW R0, [A3+#2]          ; only once he's low enough to hit someone
+  CMP R0, #30
+  BLT bw_go
+  RET
+bw_go:
+  PUSHA A1
+  PUSHA A3
+  LDW R4, [A1+#4]
+  LDW R5, [A1+#6]
+  MOV R7, #0
+bw_lp:
+  CALL slotptrs
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ bw_next
+  LDB R0, [A3+#0]          ; standing thugs only (the thrown one is airborne)
+  CMP R0, #0
+  BNE bw_next
+  LDW R0, [A1+#4]
+  SUB R0, R4
+  CALL absr0
+  CMP R0, #20
+  BGT bw_next
+  LDW R0, [A1+#6]
+  SUB R0, R5
+  CALL absr0
+  CMP R0, #12
+  BGT bw_next
+  MOV R0, #BOWLDMG
+  STB R0, [p_dmg]
+  MOV R0, #1
+  STW R0, [p_kd]
+  PUSH R4
+  PUSH R5
+  PUSH R7
+  CALL enemyhit
+  POP R7
+  POP R5
+  POP R4
+bw_next:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BGE bw_ret
+  BRA bw_lp
+bw_ret:
+  POPA A3
+  POPA A1
   RET
 
 ; ============================ enemies ============================
@@ -723,6 +1569,10 @@ de_lp:
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
+  MOV R3, R7
+  SHL R3, #4
+  LDA A3, #EX
+  ADD A3, R3
   STW R7, [eidx]           ; eai/curspd/curdmg look up ETYPE[eidx]
   PUSH R7
   CALL eai
@@ -736,14 +1586,44 @@ de_lp:
 eai:
   LDB R0, [A1+#0]
   CMP R0, #0
-  BNE ea_live
+  BNE ea_on
   RET
+ea_on:
+  LDB R0, [A3+#0]          ; knocked about? the physics in moves takes over
+  CMP R0, #0
+  BEQ ea_live
+  CMP R0, #ST_HELD
+  BNE ea_nh
+  LDB R0, [A1+#2]          ; held: the grab pins him; just run out the hit flash
+  CMP R0, #0
+  BEQ ea_hd
+  SUB R0, #1
+  STB R0, [A1+#2]
+ea_hd:
+  RET
+ea_nh:
+  CMP R0, #ST_AIR
+  BNE ea_nair
+  BRA eair
+ea_nair:
+  BRA edown
 ea_live:
   LDW R0, [ehold]         ; freshly spawned -> hold still (grace period)
   CMP R0, #0
   BEQ ea_run
   RET
 ea_run:
+  LDW R0, [bossactive]    ; the boss (slot 0) may be busy with a special move
+  CMP R0, #0
+  BEQ ea_run2
+  LDW R0, [eidx]
+  CMP R0, #0
+  BNE ea_run2
+  CALL bossai
+  CMP R0, #0
+  BEQ ea_run2
+  RET
+ea_run2:
   LDB R0, [A1+#2]         ; staggered?
   CMP R0, #0
   BEQ ea_chase
@@ -756,6 +1636,10 @@ ea_run:
 ea_stg:
   SUB R0, #1
   STB R0, [A1+#2]
+  CMP R0, #HITSTUN-KBF    ; only a short shove, so the next hit of a combo still reaches
+  BGE ea_kb
+  RET
+ea_kb:
   LDW R4, [A1+#4]         ; knock away from player in x
   LDW R6, [p_x]
   CMP R4, R6
@@ -863,6 +1747,11 @@ atkptr:
 ; ---- estrike(A1=slot): the punch lands if the player is in front, in reach, on the
 ;      row and not in i-frames. Damage is the type's TYPEDMG (bruisers hit for 2). ----
 estrike:
+  LDW R0, [p_jz]           ; high in a jump: the punch passes underneath
+  CMP R0, #JKHIGH
+  BLE ek_low
+  RET
+ek_low:
   LDW R4, [A1+#4]
   LDW R5, [A1+#6]
   LDW R0, [p_y]
@@ -892,6 +1781,33 @@ ek_miss:
 
 ; ---- hurtplayer(R4=enemy x, R2=damage): lose health, i-frames, shake, shove away ----
 hurtplayer:
+  LDW R0, [p_dead]         ; already out cold: the gang can't hurt him more
+  CMP R0, #0
+  BEQ hu_live
+  RET
+hu_live:
+  LDW R0, [p_grab]         ; a hit shakes the held thug loose ...
+  CMP R0, #0
+  BEQ hu_ng
+  SUB R0, #1
+  SHL R0, #4
+  LDA A0, #EX
+  ADD A0, R0
+  MOV R0, #0
+  STB R0, [A0]
+  STW R0, [p_grab]
+  MOV R0, #GRABCOOL
+  STW R0, [p_gcool]
+hu_ng:
+  MOV R0, #0               ; ... and knocks you out of any move or combo
+  STW R0, [p_combo]
+  STW R0, [p_chain]
+  LDW R0, [p_jz]
+  CMP R0, #0
+  BNE hu_air
+  MOV R0, #0
+  STW R0, [p_punch]
+hu_air:
   LDW R0, [p_hp]
   CMP R0, #0
   BEQ hu_if
@@ -1019,6 +1935,7 @@ uc_write:
 buildoam:
   MOV R0, #0
   STW R0, [OAM_INDEX]
+bo_go:
   LDW R0, [p_y]
   CALL depthpri
   CALL emitweapon          ; held pipe first so it draws over the hero's hand (off when unarmed)
@@ -1029,6 +1946,10 @@ bo_e:
   SHL R3, #3
   LDA A1, #ENEMY
   ADD A1, R3
+  MOV R3, R7
+  SHL R3, #4
+  LDA A3, #EX
+  ADD A3, R3
   STW R7, [eidx]           ; emitenemy reads ETYPE[eidx] to pick a palette
   CALL emitenemy
   ADD R7, #1
@@ -1117,9 +2038,50 @@ emitplayer:
   CALL emitoff
   RET
 ep_draw:
-  LDW R5, [p_punch]
-  CMP R5, #0
+  MOV R5, #PL_DOWN         ; out cold
+  LDW R0, [p_dead]
+  CMP R0, #0
+  BEQ ep_live
+  BRA ep_attr
+ep_live:
+  LDW R0, [p_punch]        ; pick the frame: throw > grab/knee > air > swing > walk
+  LDW R1, [p_atk]
+  CMP R0, #0
+  BEQ ep_nsw
+  MOV R5, #PL_THROW
+  CMP R1, #4
+  BEQ ep_attr
+ep_nsw:
+  LDW R2, [p_grab]
+  CMP R2, #0
+  BEQ ep_ngr
+  MOV R5, #PL_GRAB
+  CMP R0, #0
+  BEQ ep_attr
+  CMP R1, #3
+  BNE ep_attr
+  MOV R5, #PL_KNEE
+  BRA ep_attr
+ep_ngr:
+  LDW R2, [p_jz]
+  LDW R3, [p_jvz]
+  OR R2, R3
+  BEQ ep_gnd
+  MOV R5, #PL_JUMP
+  LDW R2, [p_jkick]
+  CMP R2, #0
+  BEQ ep_attr
+  MOV R5, #PL_JKICK
+  BRA ep_attr
+ep_gnd:
+  CMP R0, #0
   BEQ ep_walk
+  MOV R5, #PL_KICK
+  CMP R1, #1
+  BEQ ep_attr
+  MOV R5, #PL_KNEE
+  CMP R1, #3
+  BEQ ep_attr
   MOV R5, #PL_PUNCH
   BRA ep_attr
 ep_walk:
@@ -1143,6 +2105,8 @@ ep_emit:
   SUB R0, #FOFFX
   LDW R1, [p_y]
   SUB R1, #FOFFY
+  LDW R2, [p_jz]           ; lifted by the jump (the shadow stays on the street)
+  SUB R1, R2
   CALL emittile
   RET
 
@@ -1171,9 +2135,13 @@ ee_inl:
   PUSH R0                ; save screen x across the lookups
   LDW R0, [A1+#6]
   CALL depthpri          ; this enemy's depth
-  LDW R2, [bossactive]    ; during a boss wave the lone live thug is the boss
+  LDW R2, [bossactive]    ; during a boss wave slot 0 is the boss (Viper's runners aren't)
   CMP R2, #0
-  BNE ee_boss
+  BEQ ee_typed
+  LDW R2, [eidx]
+  CMP R2, #0
+  BEQ ee_boss
+ee_typed:
   CALL curtype          ; R0 = enemy type
   MOV R1, R0
   SHL R1, #1
@@ -1192,6 +2160,52 @@ ee_boss:
   OR R6, #PB_BOSS
 ee_anim:
   POP R0                ; restore screen x
+  LDB R2, [A3+#0]       ; held / airborne / floored -> reeling or flat frame of this rig
+  CMP R2, #0
+  BEQ ee_norm
+  MOV R3, #GR_HURT
+  MOV R4, #GR_DOWN
+  CMP R5, #BR_WALK
+  BNE ee_rig
+  MOV R3, #BR_HURT
+  MOV R4, #BR_DOWN
+ee_rig:
+  MOV R5, R3            ; held: reeling
+  CMP R2, #ST_HELD
+  BNE ee_nhd
+  BRA ee_tile
+ee_nhd:
+  MOV R5, R4            ; airborne / down: flat ...
+  CMP R2, #ST_AIR
+  BNE ee_dn
+  LDB R2, [A3+#8]       ; ... except a knocked-up thug reels while he rises
+  CMP R2, #0
+  BNE ee_tile
+  LDW R2, [A3+#4]
+  CMP R2, #0
+  BLE ee_tile
+  MOV R5, R3
+  BRA ee_tile
+ee_dn:
+  LDB R2, [A3+#11]      ; beaten: blink out
+  CMP R2, #0
+  BEQ ee_getup
+  LDB R2, [A3+#1]
+  AND R2, #4
+  BEQ ee_tile
+  BRA ee_cull
+ee_getup:
+  LDB R2, [A3+#1]       ; the last moments on the floor: getting up
+  CMP R2, #GETUPT
+  BGT ee_tile
+  MOV R5, R3
+  BRA ee_tile
+ee_norm:
+  CALL bossframe        ; a boss mid-special picks his own frame
+  CMP R2, #0
+  BEQ ee_norm2
+  BRA ee_tile
+ee_norm2:
   LDW R2, [eidx]        ; attacking? wind-up / punch frames replace the walk cycle
   LDA A0, #EATK
   ADD A0, R2
@@ -1229,6 +2243,8 @@ ee_face:
 ee_emit:
   LDW R1, [A1+#6]
   SUB R1, #FOFFY
+  LDW R2, [A3+#2]        ; airborne height
+  SUB R1, R2
   CALL emittile
   RET
 ee_cull:
@@ -1283,6 +2299,8 @@ ew_xpos:
   SUB R0, R3
   LDW R1, [p_y]
   SUB R1, R4             ; up to hand height (raised further in the wind-up)
+  LDW R2, [p_jz]
+  SUB R1, R2
   CALL emittile          ; same depth as the player (sprpri still holds it)
   RET
 
@@ -1407,7 +2425,15 @@ hudtile:
 ; ---- drawbosshp: a red bar (row 2) of one cell per boss HP point remaining ----
 drawbosshp:
   LDA A1, #ENEMY
-  LDB R5, [A1+#1]         ; boss current HP
+  LDB R0, [A1+#1]         ; cells = ceil(hp * BOSSBAR / max)
+  MOV R1, #BOSSBAR
+  MULU R0, R1
+  LDW R2, [bossmaxhp]
+  ADD R0, R2
+  SUB R0, #1
+  MOV R1, #0
+  DIVU R0, R2
+  MOV R5, R0
   MOV R4, #0
 bh_lp:
   CMP R4, R5
@@ -1439,6 +2465,9 @@ huddigit:
 
 ; ---- hudprint(A1=string, R4=col): draw text on BG1 row 1 (font palette 3) ----
 hudprint:
+  MOV R5, #1
+; ---- hudprintr(A1=string, R4=col, R5=row) ----
+hudprintr:
 hl_lp:
   LDB R2, [A1]
   CMP R2, #$FF
@@ -1447,7 +2476,7 @@ hl_lp:
   BEQ hl_adv
   ADD R2, #FONT
   MOV R0, R4
-  MOV R1, #1
+  MOV R1, R5
   MOV R3, #3
   CALL hudtile
 hl_adv:
@@ -1466,6 +2495,324 @@ drawlevelhud:
   ADD R0, #1             ; show 1-based
   MOV R4, #23
   CALL huddigit
+  LDA A1, #sSCORE         ; top row: SCORE ... LIVES n ... HI
+  MOV R4, #0
+  MOV R5, #0
+  CALL print
+  LDA A1, #sHI
+  MOV R4, #29
+  MOV R5, #0
+  CALL print
+  CALL drawlives
+  CALL drawscore
+  RET
+
+; ---- drawlives: "LIVES n" on the top HUD row ----
+drawlives:
+  LDA A1, #sLIVES
+  MOV R4, #17
+  MOV R5, #0
+  CALL print
+  LDW R0, [lives]
+  MOV R4, #23
+  MOV R5, #0
+  CALL printdigit
+  RET
+
+; ---- drawscore: the score and the high score on the top HUD row ----
+drawscore:
+  LDW R0, [score]
+  MOV R4, #6
+  MOV R5, #0
+  CALL drawnum6
+  LDW R0, [hiscore]
+  MOV R4, #32
+  MOV R5, #0
+  CALL drawnum6
+  RET
+
+; ---- drawnum6(R0=value in tens, R4=col, R5=row): six digits, the last always 0 ----
+drawnum6:
+  STW R0, [svrem]
+  MOV R2, #10000
+  CALL n6dig
+  MOV R2, #1000
+  CALL n6dig
+  MOV R2, #100
+  CALL n6dig
+  MOV R2, #10
+  CALL n6dig
+  MOV R2, #1
+  CALL n6dig
+  MOV R0, #0
+  STW R0, [svrem]
+  MOV R2, #1
+; ---- n6dig(R2=place): print svrem / place at (R4, R5), keep the remainder, R4++ ----
+n6dig:
+  LDW R0, [svrem]
+  MOV R1, #0
+  DIVU R0, R2              ; R0 = digit, R1 = remainder
+  STW R1, [svrem]
+  MOV R2, R0
+  ADD R2, #DIGIT
+  MOV R0, R4
+  MOV R1, R5
+  MOV R3, #3
+  CALL settile
+  ADD R4, #1
+  RET
+
+; ---- addscore(R0 = points in tens): saturating add; the high score follows it up ----
+addscore:
+  LDW R1, [score]
+  ADD R0, R1
+  CMP R1, R0
+  BLS as_ok                ; old <= new: no carry out of 16 bits
+  MOV R0, #$FFFF
+as_ok:
+  STW R0, [score]
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BLS as_done
+  STW R0, [hiscore]
+as_done:
+  RET
+
+; ---- killscore(A3): points for a beaten enemy: by type, or the boss bonus ----
+killscore:
+  LDB R0, [A3+#12]
+  CMP R0, #0
+  BNE ks_thug
+  LDW R1, [bossactive]
+  CMP R1, #0
+  BEQ ks_thug
+  MOV R0, #PTS_BOSS
+  CALL addscore
+  RET
+ks_thug:
+  LDA A0, #ETYPE
+  ADD A0, R0
+  LDB R0, [A0]
+  LDA A0, #TYPEPTS
+  ADD A0, R0
+  LDB R0, [A0]
+  CALL addscore
+  RET
+
+; ---- togglepause: Start in play freezes everything and shows PAUSED ----
+togglepause:
+  LDW R0, [paused]
+  XOR R0, #1
+  STW R0, [paused]
+  CMP R0, #0
+  BEQ tp_off
+  MOV R1, #0               ; the letters go first in OAM (first wins a priority tie)
+  STW R1, [OAM_INDEX]
+  MOV R0, #0               ; hush both channels
+  STB R0, [SQ1_CTRL]
+  STB R0, [SQ0_CTRL]
+  MOV R0, #7
+  STW R0, [sprpri]
+  LDA A1, #sPAUSED
+  MOV R0, #136             ; centred: 6 letters x 8 px
+tp_lp:
+  LDB R5, [A1]
+  CMP R5, #$FF
+  BEQ tp_snd
+  ADD R5, #FONT
+  MOV R1, #92
+  MOV R6, #PB_FONT         ; 8x8, the HUD font's bank
+  PUSH R0
+  CALL emittile
+  POP R0
+  ADD R0, #8
+  INC A1
+  BRA tp_lp
+tp_snd:
+  CALL bo_go               ; then the frozen scene behind them
+  MOV R0, #300
+  CALL sfxblip
+  RET
+tp_off:
+  CALL clearoam            ; drop the letters; this frame's buildoam redraws the scene
+  RET
+
+; ---- playerdown: the health bar ran out: drop everything and hit the street ----
+playerdown:
+  MOV R0, #DEADT
+  STW R0, [p_dead]
+  LDW R0, [p_grab]         ; let go of anyone held
+  CMP R0, #0
+  BEQ pd_ng
+  SUB R0, #1
+  SHL R0, #4
+  LDA A0, #EX
+  ADD A0, R0
+  MOV R0, #0
+  STB R0, [A0]
+pd_ng:
+  MOV R0, #0
+  STW R0, [p_grab]
+  STW R0, [p_punch]
+  STW R0, [p_atk]
+  STW R0, [p_combo]
+  STW R0, [p_chain]
+  STW R0, [p_jkick]
+  STW R0, [p_weapon]       ; the pipe goes flying
+  STW R0, [p_wswing]
+  MOV R0, #SHAKEW
+  STW R0, [shakeT]
+  MOV R0, #500
+  CALL sfxblip
+  RET
+
+; ---- lostlife: back up on the next life (knocking the gang down), else continue? ----
+lostlife:
+  LDW R0, [lives]
+  CMP R0, #1
+  BLS ll_out
+  SUB R0, #1
+  STW R0, [lives]
+  MOV R0, #HP0
+  STW R0, [p_hp]
+  MOV R0, #RESPAWNI
+  STW R0, [p_hurt]
+  CALL drawlives
+  CALL knockall
+  MOV R0, #150
+  CALL sfxblip
+  RET
+ll_out:
+  MOV R0, #0
+  STW R0, [lives]
+  LDW R0, [credits]
+  CMP R0, #0
+  BEQ gameover
+  MOV R0, #6               ; out of lives: offer a continue
+  STW R0, [state]
+  MOV R0, #CONTT
+  STW R0, [contT]
+  CALL savebest
+  CALL clearoam
+  CALL drawcont
+  RET
+
+; ---- gameover: record the run and show GAME OVER ----
+gameover:
+  MOV R0, #3
+  STW R0, [state]
+  CALL savebest            ; commit a new best-kills / high score
+  CALL clearoam
+  CALL drawover
+  RET
+
+; ---- knockall: getting back up floors every standing thug (not the boss) ----
+knockall:
+  MOV R7, #0
+ka_lp:
+  CALL slotptrs
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ ka_next
+  LDB R0, [A3+#0]
+  CMP R0, #0
+  BNE ka_next
+  CMP R7, #0
+  BNE ka_go
+  LDW R0, [bossactive]
+  CMP R0, #0
+  BNE ka_next
+ka_go:
+  PUSH R7
+  CALL launch
+  POP R7
+ka_next:
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT ka_lp
+  RET
+
+; ---- contframe: count down 9..0; Start spends a credit and replays this stage,
+;      A hurries the count, and at 0 it's GAME OVER ----
+contframe:
+  LDW R0, [in_now]
+  LDW R1, [in_prev]
+  NOT R1
+  AND R1, R0
+  MOV R0, R1
+  AND R0, #START
+  BEQ cn_a
+  LDW R0, [credits]
+  SUB R0, #1
+  STW R0, [credits]
+  MOV R0, #0
+  STW R0, [score]
+  MOV R0, #LIVES0
+  STW R0, [lives]
+  MOV R0, #HP0
+  STW R0, [p_hp]
+  MOV R0, #120
+  CALL sfxblip
+  LDW R0, [level]
+  CALL loadlevel
+  MOV R0, #1
+  STW R0, [state]
+  RET
+cn_a:
+  AND R1, #ABTN
+  BEQ cn_tick
+  LDW R0, [contT]          ; A: skip to the next digit: contT = digit*60 + 1
+  SUB R0, #1
+  MOV R1, #0
+  MOV R2, #60
+  DIVU R0, R2
+  MOV R1, #60
+  MULU R0, R1
+  ADD R0, #1
+  STW R0, [contT]
+cn_tick:
+  LDW R0, [contT]
+  SUB R0, #1
+  STW R0, [contT]
+  CMP R0, #0
+  BNE cn_draw
+  CALL gameover
+  RET
+cn_draw:
+  SUB R0, #1               ; digit = (contT - 1) / 60
+  MOV R1, #0
+  MOV R2, #60
+  DIVU R0, R2
+  MOV R4, #20
+  MOV R5, #8
+  CALL printdigit
+  RET
+
+; ---- drawcont: CONTINUE? with the countdown and the credits left ----
+drawcont:
+  CALL menureset
+  CALL menubg
+  LDA A1, #sCONT
+  MOV R4, #16
+  MOV R5, #5
+  CALL print
+  MOV R0, #9
+  MOV R4, #20
+  MOV R5, #8
+  CALL printdigit
+  LDA A1, #sCREDITS
+  MOV R4, #15
+  MOV R5, #11
+  CALL print
+  LDW R0, [credits]
+  MOV R4, #23
+  MOV R5, #11
+  CALL printdigit
+  LDA A1, #sSTART
+  MOV R4, #15
+  MOV R5, #13
+  CALL print
+  CALL oversprites
   RET
 
 ; ---- clearhp: blank the HUD rows 0-2 (HP bar + weapon widget + boss bar) ----
@@ -1648,10 +2995,13 @@ loadsave:
   BNE ld_fresh
   LDW R0, [SV_BEST]
   STW R0, [best]
+  LDW R0, [SV_HI]
+  STW R0, [hiscore]
   RET
 ld_fresh:
   MOV R0, #0
   STW R0, [best]
+  STW R0, [hiscore]
   RET
 
 ; ---- savebest: if this run's kills beat the stored best, update it, write a
@@ -1660,11 +3010,40 @@ savebest:
   LDW R0, [kills]
   LDW R1, [best]
   CMP R0, R1
-  BLS sv_done              ; kills <= best -> no new record (unsigned)
+  BLS sv_kept              ; kills <= best -> keep the old record (unsigned)
   STW R0, [best]
+sv_kept:
+  LDW R0, [score]          ; (addscore keeps hiscore up, but make sure)
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BLS sv_hi
+  STW R0, [hiscore]
+sv_hi:
+  LDW R0, [SV_HI]          ; nothing new to keep? (hiscore already climbed live)
+  LDW R1, [hiscore]
+  CMP R0, R1
+  BNE sv_write
+  LDW R0, [SV_BEST]
+  LDW R1, [best]
+  CMP R0, R1
+  BEQ sv_done
+sv_write:
   MOV R1, #SVMAGIC
   STW R1, [SV_MAG]
+  LDW R0, [best]
   STW R0, [SV_BEST]
+  LDW R0, [hiscore]
+  STW R0, [SV_HI]
+  LDA A0, #c_body          ; the fighter too, so the record is whole
+  LDA A1, #SV_CHAR
+  MOV R2, #CROWS
+sv_cp:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sv_cp
   MOV R1, #1
   STB R1, [SAVECOMMIT]     ; record complete -> host persists save RAM
 sv_done:
@@ -1720,21 +3099,25 @@ drawtitle:
   MOV R5, #6
   CALL print
   LDA A1, #sTAG
-  MOV R4, #14
+  MOV R4, #13
   MOV R5, #9
   CALL print
   LDA A1, #sSTART
   MOV R4, #15
   MOV R5, #11
   CALL print
-  LDA A1, #sBEST           ; per-browser high score, restored from save RAM
-  MOV R4, #16
+  LDA A1, #sHISC           ; per-browser high score, restored from save RAM
+  MOV R4, #12
   MOV R5, #13
   CALL print
-  LDW R0, [best]
+  LDW R0, [hiscore]
   MOV R4, #21
   MOV R5, #13
-  CALL drawnum3
+  CALL drawnum6
+  MOV R0, #1               ; the lineup's boss is Brick
+  CALL loadbr
+  MOV R0, #0
+  CALL bosspalk
   CALL titlesprites        ; hero vs. thugs + boss lineup
   RET
 
@@ -1808,6 +3191,7 @@ drawwin:
   MOV R4, #15
   MOV R5, #9
   CALL print
+  CALL drawresult
   CALL winsprites
   RET
 
@@ -1855,15 +3239,29 @@ drawover:
   MOV R4, #15
   MOV R5, #9
   CALL print
-  LDA A1, #sBEST           ; show the (possibly just-updated) best-kills record
-  MOV R4, #16
+  CALL drawresult
+
+  CALL oversprites
+  RET
+
+; ---- drawresult: SCORE and HI SCORE under a win / game over ----
+drawresult:
+  LDA A1, #sSCORE
+  MOV R4, #15
   MOV R5, #11
   CALL print
-  LDW R0, [best]
+  LDW R0, [score]
   MOV R4, #21
   MOV R5, #11
-  CALL drawnum3
-  CALL oversprites
+  CALL drawnum6
+  LDA A1, #sHISC
+  MOV R4, #12
+  MOV R5, #13
+  CALL print
+  LDW R0, [hiscore]
+  MOV R4, #21
+  MOV R5, #13
+  CALL drawnum6
   RET
 
 ; ---- oversprites: the hero is down; the gang stands over him ----
@@ -1927,8 +3325,8 @@ printdigit:
 
 ; ============================ character creator ============================
 ; The player's bank layout is fixed (outline, skin x3, hair x2, top x3, legs x3,
-; shoes x2, trim), so every body takes every colour pick. A body is 6 frames DMA'd
-; over PL_WALK..PL_DOWN; colours are ramps from charpal copied into the bank.
+; shoes x2, trim), so every body takes every colour pick. A body is 12 frames: 6 DMA'd
+; over PL_WALK..PL_DOWN, 6 over PL_KICK..PL_THROW; colours are ramps from charpal.
 
 ; ---- applychar: picks -> body tiles in VRAM + the player palette bank ----
 applychar:
@@ -1945,6 +3343,15 @@ applychar:
   STW R0, [DMA_LEN]
   MOV R0, #0
   STB R0, [DMA_MODE]       ; VRAM
+  CALL dmago
+  MOV R0, #PL_BYTES        ; then the move frames, which follow in ROM
+  ADD A0, R0
+  MOV R0, #PLX_DST
+  STW R0, [DMA_DST]
+  MOV R0, #PLX_BYTES
+  STW R0, [DMA_LEN]
+  MOV R0, #0
+  STB R0, [DMA_MODE]
   CALL dmago
   LDA A1, #CHARPAL
   LDA A0, #charpal+CP_OL
@@ -2045,6 +3452,8 @@ sc_lp:
   BNE sc_lp
   LDW R0, [best]
   STW R0, [SV_BEST]
+  LDW R0, [hiscore]
+  STW R0, [SV_HI]
   MOV R1, #SVMAGIC
   STW R1, [SV_MAG]
   MOV R1, #1
@@ -2211,10 +3620,23 @@ cf_a:
   LDW R1, [c_edge]
   MOV R0, R1
   AND R0, #ABTN
-  BEQ cf_anim
+  BEQ cf_b
+  MOV R0, #0
+  STW R0, [p_atk]
   MOV R0, #PUNCHT
   STW R0, [p_punch]
   MOV R0, #180
+  CALL sfxblip
+cf_b:
+  LDW R1, [c_edge]         ; B: a test kick
+  MOV R0, R1
+  AND R0, #BBTN
+  BEQ cf_anim
+  MOV R0, #1
+  STW R0, [p_atk]
+  MOV R0, #KICKT
+  STW R0, [p_punch]
+  MOV R0, #160
   CALL sfxblip
 cf_anim:
   LDW R0, [p_anim]
@@ -2244,6 +3666,10 @@ cf_cur:
   CMP R5, #0
   BEQ cf_walk
   MOV R5, #PL_PUNCH
+  LDW R0, [p_atk]
+  CMP R0, #1
+  BNE cf_fig
+  MOV R5, #PL_KICK
   BRA cf_fig
 cf_walk:
   LDW R0, [p_anim]
@@ -2303,7 +3729,13 @@ cs_done:
 newgame:
   MOV R0, #0
   STW R0, [kills]
+  STW R0, [score]
   STW R0, [level]
+  MOV R0, #LIVES0
+  STW R0, [lives]
+  MOV R0, #CREDITS0
+  STW R0, [credits]
+  MOV R0, #0
   CALL loadlevel           ; build stage 0 (R0 = 0)
   MOV R0, #HP0
   STW R0, [p_hp]           ; full health for a fresh game
@@ -2331,11 +3763,23 @@ loadlevel:
   STW R0, [p_anim]
   STW R0, [p_weapon]       ; pipe does not carry between stages
   STW R0, [p_wswing]
+  STW R0, [p_jz]           ; feet on the ground, hands free, no combo
+  STW R0, [p_jvz]
+  STW R0, [p_combo]
+  STW R0, [p_chain]
+  STW R0, [p_atk]
+  STW R0, [p_grab]
+  STW R0, [p_gcool]
+  STW R0, [p_jkick]
+  STW R0, [p_dead]
+  STW R0, [paused]
   MOV R0, #80
   STW R0, [p_x]            ; start at the left of the new street
   MOV R0, #150
   STW R0, [p_y]
   CALL clearpickups
+  MOV R0, #0               ; the big rig is the bruiser again (a boss may have borrowed it)
+  CALL loadbr
   CALL clearoam            ; wipe any title-screen lineup sprites
   CALL clearhp
   CALL drawlevelhud
@@ -2491,6 +3935,8 @@ dp_food:
   MOV R0, #HP0
 dp_heal:
   STW R0, [p_hp]
+  MOV R0, #PTS_FOOD
+  CALL addscore
   MOV R0, #70
   CALL sfxblip
 dp_take:
@@ -2552,6 +3998,12 @@ nw_done:
 ; ---- spawnwave: boss wave -> spawnboss; else read the (level,wave) descriptor from
 ;      wavedef and spawn one typed thug per non-empty slot, spread across the street ----
 spawnwave:
+  MOV R7, #0               ; every slot starts on its feet
+sw_clr:
+  CALL exclear
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT sw_clr
   LDW R0, [wave]
   CMP R0, #NORMW
   BLT sw_normal
@@ -2635,21 +4087,38 @@ sw_next:
 sw_ret:
   RET
 
-; ---- spawnboss: one boss in slot 0, all other slots idle, boss bar armed ----
+; ---- spawnboss: this stage's boss in slot 0 (his frames + colours loaded), all other
+;      slots idle, boss bar + name armed ----
 spawnboss:
+  LDW R0, [level]
+  STW R0, [b_kind]
+  ADD R0, #1               ; rig set 1.. = the bosses
+  CALL loadbr
+  LDW R0, [b_kind]
+  CALL bosspalk
   LDA A1, #ENEMY
   MOV R0, #1
   STB R0, [A1+#0]
-  MOV R0, #BOSSHP
+  LDW R1, [b_kind]
+  LDA A0, #BOSSHPT
+  ADD A0, R1
+  LDB R0, [A0]
   STB R0, [A1+#1]
-  LDA A2, #ETYPE          ; boss uses the grunt profile (steady speed, 1 punch dmg)
-  MOV R0, #GRUNT
-  STB R0, [A2]
+  STW R0, [bossmaxhp]
+  LDA A0, #BOSSTY          ; his base profile: speed + punch damage
+  ADD A0, R1
+  LDB R0, [A0]
+  STB R0, [ETYPE]
   MOV R0, #0
   STB R0, [EATK]          ; the boss sits in slot 0
-  MOV R0, #0
   STB R0, [A1+#2]
   STB R0, [A1+#3]
+  STW R0, [b_mode]
+  STW R0, [b_frame]
+  STW R0, [b_flash]
+  STW R0, [b_calls]
+  MOV R0, #BOSSCOOL0
+  STW R0, [b_cool]
   LDW R0, [cammax]         ; boss waits ahead of the camera limit
   ADD R0, #200
   STW R0, [A1+#4]
@@ -2668,10 +4137,594 @@ sb_lp:
   BLT sb_lp
   MOV R0, #1
   STW R0, [bossactive]
-  MOV R0, #BOSSHP
-  STW R0, [bossmaxhp]
   MOV R0, #EHOLD          ; let the boss make an entrance before it charges
   STW R0, [ehold]
+  LDW R0, [b_kind]         ; his name, left of the bar (DA entries are 3 bytes)
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #BOSSNAME
+  ADD A0, R1
+  LDADDR A1, [A0]
+  MOV R4, #4
+  MOV R5, #2
+  CALL hudprintr
+  RET
+
+; ============================ stage bosses ============================
+; One boss per stage (b_kind = level), each with a special move on top of the
+; normal chase-and-punch. bossai runs before the normal AI; while it returns R0 != 0
+; the boss is busy with the special and the normal AI is skipped.
+;   BRICK  (stage 1): revs up (flashing), then charges along his row and crashes,
+;                     dazed, at the screen edge. Jump or step off the row.
+;   VIPER  (stage 2): quick; hops back out of reach after you close in, and
+;                     whistles up two runners at 2/3 and 1/3 health.
+;   WARDEN (stage 3): crouches (flashing), leaps to where you stood and slams the
+;                     street: the shockwave hurts anyone near who isn't in the air.
+
+; ---- bossai(A1,A3 = slot 0) -> R0 = 1 while a special move runs ----
+bossai:
+  MOV R0, #0
+  STW R0, [b_flash]
+  LDW R0, [b_mode]
+  CMP R0, #0
+  BEQ ba_idle
+  LDB R0, [A1+#2]          ; specials shrug off the stagger (the flash still runs)
+  CMP R0, #0
+  BEQ ba_disp
+  SUB R0, #1
+  STB R0, [A1+#2]
+ba_disp:
+  LDW R0, [b_kind]
+  CMP R0, #1
+  BLT ba_brickj
+  BEQ ba_viperj
+  BRA wardenai
+ba_brickj:
+  BRA brickai
+ba_viperj:
+  BRA viperai
+ba_idle:
+  MOV R0, #0
+  STW R0, [b_frame]
+  LDW R0, [b_kind]         ; Viper's whistle doesn't wait for the cooldown
+  CMP R0, #1
+  BNE ba_cool
+  CALL viperbackup
+ba_cool:
+  LDW R0, [b_cool]
+  CMP R0, #0
+  BEQ ba_ready
+  SUB R0, #1
+  STW R0, [b_cool]
+ba_no:
+  MOV R0, #0
+  RET
+ba_ready:
+  LDW R4, [A1+#4]          ; only once he's on screen
+  CALL clampboss
+  CMP R0, #0
+  BNE ba_no
+  CALL atkptr              ; not mid-punch (a stagger doesn't stop him: he shrugs it off)
+  LDB R0, [A2]
+  CMP R0, #ATKCD
+  BGT ba_no
+  LDW R0, [A1+#4]          ; R4 = |dx|, R5 = |dy| to the player
+  LDW R1, [p_x]
+  SUB R0, R1
+  CALL absr0
+  MOV R4, R0
+  LDW R0, [A1+#6]
+  LDW R1, [p_y]
+  SUB R0, R1
+  CALL absr0
+  MOV R5, R0
+  LDW R0, [b_kind]
+  CMP R0, #1
+  BLT ba_brick
+  BEQ ba_viper
+  CMP R4, #180             ; Warden: leap at you from anywhere in range
+  BGT ba_no
+  MOV R0, #WARDCROUCH
+  BRA ba_start
+ba_brick:
+  MOV R0, #BRICKREV        ; Brick: rev up when you're at range ...
+  CMP R4, #60
+  BGE ba_start
+  MOV R0, #BRICKBACK       ; ... else back off first (mode 4), then rev
+  STW R0, [b_tmr]
+  MOV R0, #4
+  STW R0, [b_mode]
+  MOV R0, #1
+  RET
+ba_viper:
+  CMP R5, #10              ; Viper: hop away when you close in
+  BGT ba_no2
+  CMP R4, #34
+  BGT ba_no2
+  MOV R0, #VIPHOPV
+  STW R0, [b_vy]
+  MOV R0, #0
+ba_start:
+  STW R0, [b_tmr]
+  MOV R0, #1
+  STW R0, [b_mode]
+  CALL atkptr              ; drop any punch in progress
+  MOV R0, #0
+  STB R0, [A2]
+  CALL bossface
+  MOV R0, #1
+  RET
+ba_no2:
+  MOV R0, #0
+  RET
+
+; ---- bossface: turn the boss toward the player ----
+bossface:
+  LDW R0, [A1+#4]
+  LDW R1, [p_x]
+  MOV R2, #0
+  CMP R0, R1
+  BGE bf_s
+  MOV R2, #1
+bf_s:
+  STB R2, [A1+#3]
+  RET
+
+; ---- bossdone(R0 = cooldown): back to the normal AI ----
+bossdone:
+  STW R0, [b_cool]
+  MOV R0, #0
+  STW R0, [b_mode]
+  STW R0, [b_frame]
+  STW R0, [A3+#2]
+  MOV R0, #1               ; (this frame is still spent)
+  RET
+
+; ---- toward(R0 = speed) -> R0 = +speed if the player is to the right, else -speed ----
+toward:
+  LDW R1, [A1+#4]
+  LDW R2, [p_x]
+  CMP R1, R2
+  BLT tw_r
+  NEG R0
+tw_r:
+  RET
+
+; ---- clampboss(R4 = x) -> R4 kept inside the camera view (8..296); C set if clamped ----
+clampboss:
+  LDW R0, [cam]
+  ADD R0, #8
+  CMP R4, R0
+  BGE cb_hi
+  MOV R4, R0
+  MOV R0, #1
+  RET
+cb_hi:
+  ADD R0, #288
+  CMP R4, R0
+  BLE cb_ok
+  MOV R4, R0
+  MOV R0, #1
+  RET
+cb_ok:
+  MOV R0, #0
+  RET
+
+; ---- Brick: 1 rev up (flashing wind-up), 2 charge, 3 dazed ----
+brickai:
+  LDW R0, [b_mode]
+  CMP R0, #2
+  BNE bk_nc
+  BRA bk_charge
+bk_nc:
+  BLE bk_rev
+  CMP R0, #4
+  BEQ bk_back
+  BRA bk_dazed
+bk_back:                   ; backing off to get a run-up
+  MOV R0, #0
+  STW R0, [b_frame]
+  MOV R0, #BRICKBACKV
+  CALL toward
+  NEG R0
+  LDW R4, [A1+#4]
+  ADD R4, R0
+  CALL clampboss
+  STW R4, [A1+#4]
+  PUSH R0
+  CALL bossface
+  POP R0
+  CMP R0, #0               ; backed into the screen edge -> rev now
+  BNE bk_torev
+  LDW R0, [p_x]
+  SUB R0, R4
+  CALL absr0
+  CMP R0, #90
+  BGE bk_torev
+  LDW R0, [b_tmr]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BEQ bk_torev
+  MOV R0, #1
+  RET
+bk_torev:
+  MOV R0, #1
+  STW R0, [b_mode]
+  MOV R0, #BRICKREV
+  STW R0, [b_tmr]
+  MOV R0, #1
+  RET
+bk_rev:
+  MOV R0, #1               ; revving
+  STW R0, [b_frame]
+  CALL bossface
+  LDW R0, [b_tmr]
+  STW R0, [b_flash]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BNE bk_busy
+  MOV R0, #BRICKV          ; go!
+  CALL toward
+  STW R0, [b_vx]
+  MOV R0, #2
+  STW R0, [b_mode]
+  MOV R0, #BRICKRUN
+  STW R0, [b_tmr]
+  MOV R0, #340
+  CALL sfxblip
+bk_busy:
+  MOV R0, #1
+  RET
+bk_charge:
+  MOV R0, #2
+  STW R0, [b_frame]
+  LDW R4, [A1+#4]
+  LDW R0, [b_vx]
+  ADD R4, R0
+  CALL clampboss
+  STW R4, [A1+#4]
+  PUSH R0
+  LDW R0, [p_x]            ; run you over?
+  SUB R0, R4
+  CALL absr0
+  CMP R0, #22
+  BGT bk_miss
+  LDW R0, [p_y]
+  LDW R1, [A1+#6]
+  SUB R0, R1
+  CALL absr0
+  CMP R0, #12
+  BGT bk_miss
+  LDW R0, [p_jz]
+  CMP R0, #JKHIGH
+  BGT bk_miss
+  LDW R0, [p_hurt]
+  CMP R0, #0
+  BNE bk_miss
+  MOV R2, #BRICKDMG
+  CALL hurtplayer
+bk_miss:
+  POP R0
+  CMP R0, #0               ; hit the edge of the screen -> crash
+  BNE bk_crash
+  LDW R0, [b_tmr]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BNE bk_busy
+bk_crash:
+  MOV R0, #3
+  STW R0, [b_mode]
+  MOV R0, #BRICKDAZE
+  STW R0, [b_tmr]
+  MOV R0, #SHAKEP
+  STW R0, [shakeT]
+  MOV R0, #460
+  CALL sfxblip
+  MOV R0, #1
+  RET
+bk_dazed:
+  MOV R0, #3               ; seeing stars: free hits
+  STW R0, [b_frame]
+  LDW R0, [b_tmr]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BEQ bk_up
+  MOV R0, #1
+  RET
+bk_up:
+  MOV R0, #BRICKCOOL
+  BRA bossdone
+
+; ---- Viper: 1 = a hop back, out of reach ----
+viperai:
+  MOV R0, #1
+  STW R0, [b_frame]
+  MOV R0, #VIPHOPX         ; away from you
+  CALL toward
+  NEG R0
+  LDW R4, [A1+#4]
+  ADD R4, R0
+  CALL clampboss
+  STW R4, [A1+#4]
+  LDW R0, [A3+#2]          ; arc: z += vz, gravity every other frame
+  LDW R1, [b_vy]
+  ADD R0, R1
+  LDW R2, [gtick]
+  AND R2, #1
+  BEQ vp_g
+  SUB R1, #1
+  STW R1, [b_vy]
+vp_g:
+  CMP R0, #0
+  BLE vp_land
+  STW R0, [A3+#2]
+  MOV R0, #1
+  RET
+vp_land:
+  MOV R0, #VIPCOOL
+  BRA bossdone
+
+; ---- viperbackup: at 2/3 and 1/3 health Viper whistles up two runners ----
+viperbackup:
+  LDB R0, [A1+#1]
+  LDW R1, [b_calls]
+  CMP R1, #0
+  BNE vb_2
+  CMP R0, #VIPTH1
+  BGT vb_no
+  BRA vb_call
+vb_2:
+  CMP R1, #1
+  BNE vb_no
+  CMP R0, #VIPTH2
+  BGT vb_no
+vb_call:
+  ADD R1, #1
+  STW R1, [b_calls]
+  PUSHA A1
+  PUSHA A3
+  LDW R0, [cam]            ; one from each side of the screen
+  SUB R0, #24
+  CMP R0, #XMIN
+  BGE vb_l
+  MOV R0, #XMIN
+vb_l:
+  CALL backup
+  LDW R0, [cam]
+  ADD R0, #330
+  CALL backup
+  POPA A3
+  POPA A1
+  MOV R0, #60              ; whistle
+  CALL sfxblip
+vb_no:
+  RET
+
+; ---- backup(R0 = x): a runner into the first free slot after the boss, on your row ----
+backup:
+  MOV R6, R0
+  MOV R7, #1
+bu_lp:
+  CALL slotptrs
+  LDB R0, [A1+#0]
+  CMP R0, #0
+  BEQ bu_free
+  ADD R7, #1
+  CMP R7, #NENEM
+  BLT bu_lp
+  RET
+bu_free:
+  CALL exclear
+  MOV R0, #1
+  STB R0, [A1+#0]
+  MOV R0, #2
+  STB R0, [A1+#1]          ; runner hp
+  MOV R0, #0
+  STB R0, [A1+#2]
+  STB R0, [A1+#3]
+  STW R6, [A1+#4]
+  LDW R0, [p_y]
+  STW R0, [A1+#6]
+  LDA A2, #ETYPE
+  ADD A2, R7
+  MOV R0, #RUNNER
+  STB R0, [A2]
+  LDA A2, #EATK
+  ADD A2, R7
+  MOV R0, #0
+  STB R0, [A2]
+  RET
+
+; ---- Warden: 1 crouch (flashing), 2 leap at where you stood, 3 recover ----
+wardenai:
+  LDW R0, [b_mode]
+  CMP R0, #2
+  BEQ wd_leap
+  BLE wd_crouch
+  BRA wd_rec
+wd_crouch:
+  MOV R0, #1               ; crouching
+  STW R0, [b_frame]
+  CALL bossface
+  LDW R0, [b_tmr]
+  STW R0, [b_flash]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BNE wd_busy
+  LDW R0, [p_x]            ; take off: cover the gap in WARDLEAP frames
+  LDW R1, [A1+#4]
+  SUB R0, R1
+  SAR R0, #4
+  STW R0, [b_vx]
+  LDW R0, [p_y]
+  LDW R1, [A1+#6]
+  SUB R0, R1
+  SAR R0, #4
+  STW R0, [b_vy]
+  MOV R0, #2
+  STW R0, [b_mode]
+  MOV R0, #WARDLEAP
+  STW R0, [b_tmr]
+  MOV R0, #320
+  CALL sfxblip
+wd_busy:
+  MOV R0, #1
+  RET
+wd_leap:
+  MOV R0, #1
+  STW R0, [b_frame]
+  LDW R4, [A1+#4]
+  LDW R0, [b_vx]
+  ADD R4, R0
+  CALL clampboss
+  STW R4, [A1+#4]
+  LDW R5, [A1+#6]
+  LDW R0, [b_vy]
+  ADD R5, R0
+  CMP R5, #BANDTOP
+  BGE wd_y1
+  MOV R5, #BANDTOP
+wd_y1:
+  CMP R5, #BANDBOT
+  BLE wd_y2
+  MOV R5, #BANDBOT
+wd_y2:
+  STW R5, [A1+#6]
+  LDW R0, [b_tmr]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BEQ wd_land
+  MOV R1, #WARDLEAP        ; z = t * (WARDLEAP - t) / 2, t = frames since take-off
+  SUB R1, R0
+  MULU R0, R1
+  SHR R0, #1
+  STW R0, [A3+#2]
+  MOV R0, #1
+  RET
+wd_land:
+  MOV R0, #0
+  STW R0, [A3+#2]
+  MOV R0, #12
+  STW R0, [shakeT]
+  MOV R0, #500
+  CALL sfxblip
+  LDW R0, [p_x]            ; the shockwave
+  SUB R0, R4
+  CALL absr0
+  CMP R0, #WARDWAVE
+  BGT wd_nohit
+  LDW R0, [p_y]
+  SUB R0, R5
+  CALL absr0
+  CMP R0, #20
+  BGT wd_nohit
+  LDW R0, [p_jz]
+  CMP R0, #0
+  BNE wd_nohit
+  LDW R0, [p_hurt]
+  CMP R0, #0
+  BNE wd_nohit
+  MOV R2, #WARDDMG
+  CALL hurtplayer
+wd_nohit:
+  MOV R0, #3
+  STW R0, [b_mode]
+  MOV R0, #WARDREC
+  STW R0, [b_tmr]
+  MOV R0, #1
+  RET
+wd_rec:
+  MOV R0, #0
+  STW R0, [b_frame]
+  LDW R0, [b_tmr]
+  SUB R0, #1
+  STW R0, [b_tmr]
+  BEQ wd_up
+  MOV R0, #1
+  RET
+wd_up:
+  MOV R0, #WARDCOOL
+  BRA bossdone
+
+; ---- bossframe(R5/R6 = tile/attr): R2 = 1 if the boss is mid-special, with R5 = his
+;      frame and R6 flashing on the telegraph; else R2 = 0 and nothing changed ----
+bossframe:
+  LDW R2, [bossactive]
+  CMP R2, #0
+  BEQ bfr_no
+  LDW R2, [eidx]
+  CMP R2, #0
+  BNE bfr_no
+  LDW R2, [b_frame]
+  CMP R2, #0
+  BEQ bfr_no
+  MOV R5, #BR_WIND
+  CMP R2, #2
+  BLT bfr_fl
+  MOV R5, #BR_PUNCH
+  BEQ bfr_fl
+  MOV R5, #BR_HURT
+bfr_fl:
+  LDW R2, [b_flash]
+  AND R2, #4
+  BEQ bfr_yes
+  AND R6, #$F0
+  OR R6, #PB_FLASH
+bfr_yes:
+  MOV R2, #1
+  RET
+bfr_no:
+  MOV R2, #0
+  RET
+
+; ---- loadbr(R0 = set): DMA a six-frame big-rig set (0 bruiser, 1.. the bosses)
+;      over BR_WALK x2, BR_DOWN, BR_WIND + BR_PUNCH, BR_HURT ----
+loadbr:
+  LDA A0, #bossrigs
+lb_lp:
+  CMP R0, #0
+  BEQ lb_go
+  MOV R1, #12288
+  ADD A0, R1
+  SUB R0, #1
+  BRA lb_lp
+lb_go:
+  MOV R0, #BRW_DST
+  MOV R1, #4096
+  CALL vdma
+  MOV R0, #BRD_DST
+  MOV R1, #2048
+  CALL vdma
+  MOV R0, #BRWP_DST
+  MOV R1, #4096
+  CALL vdma
+  MOV R0, #BRH_DST
+  MOV R1, #2048
+  CALL vdma
+  RET
+
+; ---- vdma(A0 = src, R0 = VRAM byte offset, R1 = length): copy, then A0 += length ----
+vdma:
+  STW R0, [DMA_DST]
+  STW R1, [DMA_LEN]
+  MOV R0, #0
+  STB R0, [DMA_MODE]
+  PUSH R1
+  CALL dmago
+  POP R1
+  ADD A0, R1
+  RET
+
+; ---- bosspalk(R0 = kind): that boss's colours into bank 6 ----
+bosspalk:
+  MOV R1, #30
+  MULU R0, R1
+  LDA A0, #bosspal
+  ADD A0, R0
+  MOV R0, #PB6PAL
+  MOV R1, #30
+  CALL dmapal
   RET
 
 ; ============================ audio ============================
@@ -2752,8 +4805,24 @@ TYPEDMG:                         ; punch damage
   DB 1, 1, 2
 TYPEBANK:                        ; sprite palette bank
   DB 2, 7, 8
+TYPEPTS:                         ; points for beating one (in tens)
+  DB 10, 15, 20
 TYPETILE:                        ; walk-frame-A tile base (grunt + runner share a rig, recoloured)
   DW GR_WALK, GR_WALK, BR_WALK
+
+; ---- stage bosses, indexed by kind (= stage) ----
+BOSSHPT:                         ; hit points
+  DB 28, 24, 34
+BOSSTY:                          ; base profile (speed / punch damage): Brick + Warden heavy, Viper quick
+  DB BRUISER, RUNNER, BRUISER
+BOSSNAME:
+  DA bnBRICK, bnVIPER, bnWARDEN
+bnBRICK:
+  DB B, R, I, C, K, END
+bnVIPER:
+  DB V, I, P, E, R, END
+bnWARDEN:
+  DB W, A, R, D, E, N, END
 
 ; ---- wave descriptors: NLEVELS*NORMW rows, NENEM type bytes each (NONE = empty).
 ;      Row index = level*NORMW + wave. Difficulty ramps across the stages. ----
@@ -2778,9 +4847,9 @@ CHZERO:                          ; default picks (no save yet)
   DB 0, 0, 0, 0, 0, 0
 SWTAB:                           ; per colour row: first bank colour, swatch width
   DB 2, 3, 5, 2, 7, 3, 10, 3, 13, 2
-BODYTAB:                         ; ROM address of each body's 6 frames
-  DA bodies, bodies+PL_BYTES, bodies+24576, bodies+36864
-  DA bodies+49152, bodies+61440, bodies+73728, bodies+86016
+BODYTAB:                         ; ROM address of each body's 12 frames (PL_BYTES + PLX_BYTES)
+  DA bodies, bodies+24576, bodies+49152, bodies+73728
+  DA bodies+98304, bodies+122880, bodies+147456, bodies+172032
 NAMETAB:                         ; body names (keep in step with BODIES in the art tool)
   DA nRIO, nMARA, nTANK, nKENJI, nZED, nFOX, nLIN, nWOLF
 nRIO:
@@ -2820,7 +4889,7 @@ sTITLE1:
 sTITLE2:
   DB B, R, A, W, L, END
 sTAG:
-  DB G, R, A, B, SPC, T, H, E, SPC, P, I, P, E, END
+  DB A, SPC, P, U, N, C, H, SPC, SPC, B, SPC, J, U, M, P, END
 sSTART:
   DB P, U, S, H, SPC, S, T, A, R, T, END
 sSTAGE:
@@ -2833,6 +4902,20 @@ sOVER:
   DB G, A, M, E, SPC, O, V, E, R, END
 sBEST:
   DB B, E, S, T, SPC, END
+sSCORE:
+  DB S, C, O, R, E, END
+sHI:
+  DB H, I, END
+sHISC:
+  DB H, I, SPC, S, C, O, R, E, END
+sLIVES:
+  DB L, I, V, E, S, END
+sPAUSED:
+  DB P, A, U, S, E, D, END
+sCONT:
+  DB C, O, N, T, I, N, U, E, END
+sCREDITS:
+  DB C, R, E, D, I, T, S, END
 
 ; ---- art (examples/streetbrawl/gen_art.js) ----
 levels:                          ; NLEVELS x LEVELREC: 224-word sky, banks 1 (13 words), 2 + 10 (15 each)
@@ -2843,8 +4926,12 @@ mapdata:                         ; BG0 then BG1: 64x28 cells x 4 bytes
   INCBIN "maps.bin"
 charpal:                         ; creator colour ramps (see CP_* offsets)
   INCBIN "charpal.bin"
-bodies:                          ; NBODY x PL_BYTES: the selectable bodies
+bodies:                          ; NBODY x (PL_BYTES + PLX_BYTES): the selectable bodies
   INCBIN "bodies.bin"
+bossrigs:                        ; 4 x six big-rig frames: bruiser, Brick, Viper, Warden
+  INCBIN "bosses.bin"
+bosspal:                         ; 3 x 15 RGB555: each boss's bank-6 colours
+  INCBIN "bosspal.bin"
 tiledata:                        ; VRAM tiles from index 0
   INCBIN "tiles.bin"
 tiledataend:

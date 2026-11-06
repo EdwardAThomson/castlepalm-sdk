@@ -139,6 +139,10 @@
     if (pose === 'airpunch') { legs = tuck; arms = punchArms; lean = 2 }
     if (pose === 'airkick') { legs = [{ th: 0.6, sh: -1.1 }, { th: 1.05, sh: 1.0 }]; arms = [{ up: -0.4, fo: 0.6 }, { up: 0.9, fo: 2.4 }]; lean = -3; hipDx = -6 }
     if (pose === 'rise') { legs = [{ th: -0.15, sh: -0.1 }, { th: 1.35, sh: 0.1 }]; arms = [{ up: -0.5, fo: 0.3 }, { up: 2.75, fo: 3.0 }]; lean = 1.5 }
+    // Street Brawl grappling: hold a thug by the collar, drive a knee up, heave him away
+    if (pose === 'grab') { legs = stance; arms = [{ up: 1.35, fo: 1.75 }, { up: 1.5, fo: 1.45 }]; lean = 1.5 }
+    if (pose === 'knee') { legs = [{ th: -0.12, sh: -0.08 }, { th: 1.55, sh: -0.35 }]; arms = [{ up: 1.1, fo: 0.6 }, { up: 1.25, fo: 0.45 }]; lean = 2.5 }
+    if (pose === 'throw') { legs = [{ th: -0.5, sh: -0.3 }, { th: 0.6, sh: 0.25 }]; arms = [{ up: 2.2, fo: 2.6 }, { up: 2.0, fo: 2.4 }]; lean = 3 }
     if (pose === 'win') { legs = [{ th: -0.18, sh: -0.12 }, { th: 0.18, sh: 0.1 }]; arms = [{ up: -0.35, fo: 1.9 }, { up: 2.7, fo: 3.05 }]; lean = 0 }
     const legDrop = l => Math.cos(l.th) * thigh + Math.cos(l.sh) * shin
     const hip = [32 + hipDx, 61 - Math.max(...legs.map(legDrop)) - 2]
