@@ -7,9 +7,9 @@
 //   tiles.bin   VRAM tile region from tile 0 (HUD, fonts, sparks, courtyard)
 //   maps.bin    BG0 then BG1 map, 64x28 cells x 4 bytes each
 //   pal.bin     all 256 palette entries (fighter banks 8/9 are filled at runtime)
-//   stages.bin  per rival: a 224-word sky gradient + sky bank 1 (12 words)
+//   stages.bin  per stage: a 224-word sky gradient + sky bank 1 (12 words) + the courtyard banks 2, 6, 7, 10, 11 re-lit (80 words)
 //   bodies.bin  NBODY bodies x NPOSE poses x 64 tiles: streamed into the
-//               fighter slots every frame by DMA
+//                              fighter slots every frame by DMA
 //
 // The creator's colour ramps are Street Brawl's (examples/streetbrawl/charpal.bin), and the
 // bodies are Street Brawl's eight, drawn in the extra fighting poses of examples/streetbrawl/rig.js.
@@ -37,21 +37,31 @@ const T = {
   TITLE: 512,              // 32x32 title letters, 16 tiles each, in TITLE order (spaces skipped)
   SPARK: 688, BSPARK: 696, // 16x16 hit / block sparks, 2 frames each
   SHADOW: 704,             // 32x32
-  BG_BASE: 720,
+  BOLT: 720,               // 16x16 Seal Bolt projectile, 2 frames
+  STARS: 728,              // 16x16 dizzy stars, 2 frames
+  PORT: 736,               // 32x32 select-screen portraits, one per fighter (16 tiles each)
+  BG_BASE: 864,
 }
-const BANK = { HUD: 0, SKY: 1, STONE: 2, FONT: 3, FLASH: 4, SPARK: 5, GATE: 6, PALM: 7, P2: 8, P1: 9, FLOOR: 10, BANNER: 11, BIG: 12, TITLE: 13, SHADOW: 15 }
+const BANK = { HUD: 0, SKY: 1, STONE: 2, FONT: 3, FLASH: 4, SPARK: 5, GATE: 6, PALM: 7, P2: 8, P1: 9, FLOOR: 10, BANNER: 11, BIG: 12, TITLE: 13, STATUE: 14, SHADOW: 15 }
 const POSES = [['guard', 0], ['gwalk', Math.PI / 2], ['gwalk', Math.PI * 1.5], ['crouch', 0], ['jump', 0], ['punch', 0], ['kick', 0],
-  ['cpunch', 0], ['lowkick', 0], ['airpunch', 0], ['airkick', 0], ['block', 0], ['cblock', 0], ['hurt', 0], ['down', 0], ['rise', 0], ['win', 0]]
+  ['cpunch', 0], ['lowkick', 0], ['airpunch', 0], ['airkick', 0], ['block', 0], ['cblock', 0], ['hurt', 0], ['down', 0], ['rise', 0], ['win', 0],
+  ['hpunch', 0], ['hkick', 0], ['clinch', 0], ['fire', 0], ['dizzy', 0]]
 const POSE = Object.fromEntries(POSES.map(([n], i) => [n, i]))   // gwalk -> 1 (2 is the second walk frame)
 const POSE_BYTES = 64 * 32
 const BODIES = SB.BODIES
-// 1P ladder: body + creator picks (skin, hair, top, legs, shoes) per rival
-const RIVALS = [
-  { body: 'TANK', picks: [3, 1, 6, 1, 3] },
-  { body: 'MARA', picks: [1, 4, 2, 3, 1] },
-  { body: 'KENJI', picks: [2, 1, 1, 7, 0] },
-  { body: 'WOLF', picks: [4, 5, 5, 8, 0] },
+// the roster: one fighter per body, with main and alternate creator picks (skin, hair, top, legs, shoes)
+const ROSTER = [
+  { body: 'RIO', main: [0, 0, 0, 0, 0], alt: [1, 2, 8, 1, 1] },
+  { body: 'MARA', main: [1, 4, 2, 3, 1], alt: [0, 7, 8, 5, 6] },
+  { body: 'TANK', main: [3, 1, 6, 1, 3], alt: [2, 5, 1, 6, 2] },
+  { body: 'KENJI', main: [2, 1, 1, 7, 0], alt: [0, 0, 7, 1, 4] },
+  { body: 'ZED', main: [1, 4, 6, 1, 2], alt: [3, 1, 5, 7, 7] },
+  { body: 'FOX', main: [3, 1, 7, 2, 1], alt: [4, 3, 3, 9, 5] },
+  { body: 'LIN', main: [1, 1, 8, 6, 6], alt: [0, 2, 1, 3, 3] },
+  { body: 'WOLF', main: [4, 5, 5, 8, 0], alt: [5, 1, 9, 4, 3] },
 ]
+// 1P ladder: rivals fight in their main colours
+const RIVALS = ['TANK', 'MARA', 'KENJI', 'WOLF'].map(n => ({ body: n, picks: ROSTER.find(r => r.body === n).main }))
 
 // ---------- colour / palette ----------
 const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]
@@ -69,22 +79,48 @@ function bank(n, colours) {                 // [[name, '#rrggbb'], ...] -> entri
 const SKY_NAMES = ['cl0', 'cl1', 'cl2', 'cl3', 'pa0', 'pa1', 'pa2', 'dm0', 'dm1', 'pf0', 'pf1', 'lamp']
 const STAGES = [
   { // morning
+    tint: [1, 1, 1, 1],
     sky: [[0, '#3a6cc0'], [60, '#6a9ad8'], [110, '#b4d0ec'], [140, '#f0e4c8']],
     bank: ['#b8c8e4', '#d8e2f2', '#f0f4fa', '#ffffff', '#7a8cb4', '#94a6c8', '#b2c0da', '#c09a48', '#f0d488', '#5a7aa0', '#6a8cb0', '#fff0b0'],
   },
   { // noon
+    tint: [1, 1, 1, 1],
     sky: [[0, '#1a58c8'], [70, '#3a80e0'], [130, '#88c0f0']],
     bank: ['#a8c4ec', '#cadcf6', '#ecf2fc', '#ffffff', '#c8b490', '#dcc8a4', '#f0e2c4', '#c8902c', '#ffd65a', '#4a8a5a', '#5ea06a', '#fff4c0'],
   },
   { // sunset
+    tint: [1.05, 0.82, 0.7, 0.9],
     sky: [[0, '#241848'], [40, '#5a2a70'], [90, '#c0506a'], [124, '#f49a5a'], [140, '#ffd27a']],
     bank: ['#6a3a6e', '#a8507a', '#e88a7a', '#ffc49a', '#3a2650', '#4c3062', '#603c74', '#a05a30', '#ffb04a', '#2a1a3a', '#3a2448', '#ffd070'],
   },
   { // dusk
+    tint: [0.5, 0.55, 0.78, 0.55],
     sky: [[0, '#06081c'], [60, '#121a40'], [110, '#2c3466'], [140, '#5a4a78']],
     bank: ['#1c2244', '#2a3258', '#3c4670', '#5a6690', '#141a34', '#1c2444', '#283258', '#6a5020', '#e0b048', '#0c1024', '#141a32', '#ffe08a'],
   },
+  { // dawn
+    tint: [1, 0.88, 0.9, 0.9],
+    sky: [[0, '#2a2a5a'], [50, '#7a5a90'], [100, '#e89aa0'], [140, '#ffd8b0']],
+    bank: ['#c890a8', '#e8b0b8', '#f8d0c8', '#fff0e0', '#8a7090', '#a888a4', '#c8a8b8', '#b07848', '#f0b878', '#5a5070', '#6a6080', '#fff0c0'],
+  },
+  { // midnight
+    tint: [0.34, 0.38, 0.62, 0.4],
+    sky: [[0, '#020208'], [80, '#0a0a24'], [140, '#1a1440']],
+    bank: ['#14142a', '#1e1e3a', '#2a2a4c', '#3a3a60', '#0c0c1c', '#141428', '#1c1c36', '#4a3a6a', '#8a7ac0', '#06060e', '#0c0c18', '#c0a0ff'],
+  },
+  { // storm
+    tint: [0.68, 0.74, 0.74, 0.45],
+    sky: [[0, '#2a3034'], [70, '#4a5458'], [140, '#8a9490']],
+    bank: ['#3a4044', '#525a5e', '#6a7276', '#8a9296', '#4a5048', '#5a6258', '#6e766a', '#6a6040', '#a09060', '#2a3a2a', '#344634', '#ffe090'],
+  },
+  { // sea haze
+    tint: [0.9, 1, 1.04, 0.85],
+    sky: [[0, '#0a4a6a'], [70, '#2a8aa0'], [130, '#9ad8d8'], [140, '#d8f0e8']],
+    bank: ['#8ac8d0', '#b0e0e4', '#d8f2f2', '#ffffff', '#5a8a98', '#78a6b0', '#98c2c8', '#3a8a8a', '#7ad0c8', '#2a6a6a', '#3a7a78', '#f0fff0'],
+  },
 ]
+// each character's home stage: the arcade rival's, P2's in versus, the dummy's in training
+const HOME = { RIO: 4, MARA: 1, TANK: 0, KENJI: 2, ZED: 5, FOX: 6, LIN: 7, WOLF: 3 }
 function skyLines(stops) {
   const out = []
   for (let y = 0; y < 224; y++) {
@@ -104,10 +140,13 @@ const HUD = bank(BANK.HUD, [
 const SKY = bank(BANK.SKY, SKY_NAMES.map((n, i) => [n, STAGES[0].bank[i]]))
 bank(BANK.FONT, [['w', '#ffffff'], ['sh', '#101018'], ['y', '#ffe08a']])
 bank(BANK.FLASH, [['ol', '#5a1020'], ...Array.from({ length: 14 }, (_, i) => ['f' + i, i % 3 === 0 ? '#ffd8d8' : '#ffffff'])])
-const SPARK = bank(BANK.SPARK, [['y0', '#ff8a20'], ['y1', '#ffd040'], ['y2', '#fff8c0'], ['b0', '#2a6ae0'], ['b1', '#7ac8ff'], ['b2', '#e8f8ff']])
+const SPARK = bank(BANK.SPARK, [['y0', '#ff8a20'], ['y1', '#ffd040'], ['y2', '#fff8c0'], ['b0', '#2a6ae0'], ['b1', '#7ac8ff'], ['b2', '#e8f8ff'], ['w', '#ffffff'], ['r0', '#c0281c']])
 const BIGB = bank(BANK.BIG, [['ol', '#140a10'], ['g0', '#8a4a10'], ['g1', '#d08a20'], ['g2', '#ffd050'], ['g3', '#fff4b0']])
 const TITB = bank(BANK.TITLE, [['ol', '#100810'], ['d0', '#4a0e18'], ['d1', '#8a1a24'], ['d2', '#d03a30'], ['d3', '#ff8a50'], ['g2', '#ffd050'], ['g3', '#fff4c0']])
 bank(BANK.SHADOW, [['s', '#0e0c14']])
+// select-screen statues: the rig's 15 entries (Rig NAMES order) as weathered stone
+bank(BANK.STATUE, [['ol', '#1a1820'], ['sk0', '#4c4852'], ['sk1', '#7c7884'], ['sk2', '#aca8b4'], ['hr0', '#3a3640'], ['hr1', '#64606c'],
+  ['jk0', '#444049'], ['jk1', '#6e6a76'], ['jk2', '#9a96a2'], ['jn0', '#3e3a44'], ['jn1', '#625e6a'], ['jn2', '#8a8692'], ['sh0', '#36323c'], ['sh1', '#5c5864'], ['wh', '#d8d4dc']])
 
 // courtyard colours by name; banks are lists of these names
 const C = {
@@ -358,6 +397,7 @@ const PUNCT = {
   '-': ['     ', '     ', '     ', ' ### ', '     ', '     ', '     '], '?': [' ### ', '#   #', '    #', '   # ', '  #  ', '     ', '  #  '],
   ':': ['     ', ' ##  ', ' ##  ', '     ', ' ##  ', ' ##  ', '     '], "'": ['  #  ', '  #  ', ' #   ', '     ', '     ', '     ', '     '],
   '<': SB.ARROWS.l, '>': SB.ARROWS.r,
+  '+': ['     ', '  #  ', '  #  ', '#####', '  #  ', '  #  ', '     '], ',': ['     ', '     ', '     ', '     ', '     ', ' ##  ', ' #   '],
 }
 const glyphOf = ch => /[A-Z]/.test(ch) ? SB.GLYPHS[ch] : /[0-9]/.test(ch) ? SB.DIGITS[+ch] : PUNCT[ch]
 function glyphTile(g) {                       // 8x8, bank FONT: white top, warm lower rows, dark drop shadow
@@ -402,6 +442,34 @@ for (let f = 0; f < 2; f++) putBlock(T.BSPARK + f * 4, spark(f, [SPARK.idx.b0, S
 const shadow = new Uint8Array(32 * 32)
 for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) if (Math.hypot((x + 0.5 - 16) / 15, (y + 0.5 - 28) / 3.4) < 1) shadow[y * 32 + x] = 1
 putBlock(T.SHADOW, shadow, 32)
+// Seal Bolt: a gold seal ring with a white core and a trail behind it (drawn facing right)
+function bolt(f) {
+  const img = new Uint8Array(256), S = SPARK.idx
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const dx = x + 0.5 - 10, dy = y + 0.5 - 8, r = Math.hypot(dx, dy)
+    if (r < 2.4) img[y * 16 + x] = S.w
+    else if (r < 3.6) img[y * 16 + x] = S.y2
+    else if (r < 5.2) img[y * 16 + x] = (Math.floor(Math.atan2(dy, dx) * 4 / Math.PI + f) & 1) ? S.y1 : S.r0
+    else if (r < 6.2) img[y * 16 + x] = S.y0
+    else if (dx < -4 && Math.abs(dy) < 3.2 - (-dx - 4) * 0.35 + (f ? 0.6 : 0) && ((x + f) % 3 !== 0)) img[y * 16 + x] = Math.abs(dy) < 1.2 ? S.y1 : S.y0
+  }
+  return img
+}
+// dizzy stars: three small four-point stars circling (frames offset by 60 degrees)
+function stars(f) {
+  const img = new Uint8Array(256), S = SPARK.idx
+  for (let k = 0; k < 3; k++) {
+    const a = (k * 2 + f) * Math.PI / 3, cx = 8 + Math.cos(a) * 5.5, cy = 8 + Math.sin(a) * 2.6
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const dx = Math.abs(x + 0.5 - cx), dy = Math.abs(y + 0.5 - cy)
+      if (dx + dy < 1.2) img[y * 16 + x] = S.w
+      else if ((dx < 0.8 && dy < 2.6) || (dy < 0.8 && dx < 2.6)) img[y * 16 + x] = S.y2
+    }
+  }
+  return img
+}
+for (let f = 0; f < 2; f++) putBlock(T.BOLT + f * 4, bolt(f), 16)
+for (let f = 0; f < 2; f++) putBlock(T.STARS + f * 4, stars(f), 16)
 
 // background layers -> deduped tiles (with flips) + map entries, bank picked per tile
 const tileKey = new Map([['0'.repeat(64), { t: 0 }]])
@@ -446,8 +514,83 @@ const bodyBlobs = BODIES.map(b => {
   })
   return blk
 })
+// portraits: head and shoulders from each body's guard frame (rig indices, so any bank colours them)
+BODIES.forEach((b, i) => {
+  const { img } = Rig.draw({ ...b, pose: 'guard', colours: charColours })
+  const crop = new Uint8Array(32 * 32)
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) crop[y * 32 + x] = img[(y + 2) * 64 + x + 16]
+  putBlock(T.PORT + i * 16, crop, 32)
+})
+
+// bonus stage: the siege cart (3 damage states, 64x64, streamed like a body) and its palette
+const CART = ['#1a1012', '#4a2a18', '#7a4a28', '#a8743c', '#d8a860', '#3a3a44', '#6a6a78', '#a8a8b8', '#c8b07a', '#b02028', '#e04848']
+const cartFrames = [0, 1, 2].map(state => {
+  const img = new Uint8Array(64 * 64)
+  const px = (x, y, c) => { x = Math.round(x); y = Math.round(y); if (x >= 0 && y >= 0 && x < 64 && y < 64) img[y * 64 + x] = c }
+  const rect = (x0, y0, x1, y1, c) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) px(x, y, c) }
+  const wheel = (cx, cy) => {
+    for (let y = -10; y <= 10; y++) for (let x = -10; x <= 10; x++) {
+      const r = Math.hypot(x, y)
+      if (r <= 9.6) px(cx + x, cy + y, r > 7.8 ? 6 : r > 6.8 ? 7 : r < 2 ? 6 : (Math.abs(x) < 1.2 || Math.abs(y) < 1.2 || Math.abs(x - y) < 1.2 || Math.abs(x + y) < 1.2) ? 3 : 0)
+      else if (r <= 10.6) px(cx + x, cy + y, 1)
+    }
+  }
+  const tilt = state === 2 ? 0.12 : 0
+  const bedY = x => 40 + (x - 32) * tilt
+  // frame posts and roof (collapsed when wrecked)
+  if (state < 2) {
+    rect(9, 12, 12, 38, 2); rect(52, 12, 55, 38, 2); rect(9, 12, 9, 38, 4); rect(52, 12, 52, 38, 4)
+    const sag = state === 1 ? 5 : 0
+    for (let x = 4; x <= 60; x++) { const dy = x > 32 ? sag * (x - 32) / 28 : 0; rect(x, 9 + dy, x, 13 + dy, x % 9 === 0 ? 2 : 3); px(x, 9 + dy, 4) }
+    for (let x = 30; x <= 34; x++) px(x, 26, 1)
+    // the ram on its ropes
+    rect(22, 13, 22, 23, 9); rect(44, 13 + sag * 0.4, 44, 23, 9)
+    for (let x = 12; x <= 56; x++) { rect(x, 23, x, 29, x % 7 === 0 ? 2 : 3); px(x, 23, 4); px(x, 29, 2) }
+    rect(54, 22, 59, 30, 6); rect(55, 23, 58, 29, 7); rect(59, 24, 60, 28, 8)
+  } else {
+    for (let x = 6; x <= 58; x++) { const y = bedY(x) - 6 - Math.round(Math.sin(x * 0.4) * 1.5); rect(x, y, x, y + 4, x % 9 === 0 ? 2 : 3) }
+    rect(14, 30, 40, 34, 3); rect(38, 32, 44, 36, 6)
+  }
+  // bed: planks, iron bands, banner
+  for (let x = 2; x <= 62; x++) { const y = Math.round(bedY(x)); rect(x, y - 3, x, y + 4, x % 8 === 0 ? 1 : (x % 8 < 4 ? 3 : 2)); px(x, y - 3, 4); px(x, y + 4, 1) }
+  rect(16, Math.round(bedY(16)) - 3, 17, Math.round(bedY(16)) + 4, 6); rect(46, Math.round(bedY(46)) - 3, 47, Math.round(bedY(46)) + 4, 6)
+  if (state < 2) { rect(26, 31, 37, 36, 10); rect(26, 31, 37, 31, 11); for (let y = 37; y <= 39; y++) rect(26 + (y - 37), y, 37 - (y - 37), y, 10) }
+  // damage: holes and cracks
+  if (state >= 1) {
+    for (const [x, y] of [[20, 39], [21, 40], [40, 41], [41, 41], [33, 38], [50, 39], [6, 40]]) { px(x, y, 1); px(x + 1, y, 1) }
+    if (state === 1) for (let i = 0; i < 6; i++) { px(30 + i, 12 + i, 1); px(10, 20 + i * 2, 1) }
+  }
+  wheel(16, 52)
+  if (state < 2) wheel(48, 52)
+  else { rect(44, 58, 58, 60, 2); rect(46, 57, 50, 57, 6); rect(52, 61, 60, 61, 1); for (let i = 0; i < 4; i++) rect(56 + i, 55 - i * 2, 57 + i, 55 - i * 2, 3) }
+  return img
+})
+const cartBlob = new Uint8Array(3 * POSE_BYTES)
+cartFrames.forEach((img, f) => {
+  for (let ty = 0; ty < 8; ty++) for (let tx = 0; tx < 8; tx++) for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x += 2) {
+    const k = (ty * 8 + y) * 64 + tx * 8 + x
+    cartBlob[(f * 64 + ty * 8 + tx) * 32 + y * 4 + (x >> 1)] = (img[k] << 4) | img[k + 1]
+  }
+})
+const cartPal = new Uint16Array(16)
+CART.forEach((c, i) => { cartPal[i + 1] = to555(hex(c)) })
+
 // the default creator colours also fill banks 8 and 9 so the title shows something sane
 Rig.makeBank(charColours).colours.forEach((c, i) => { palette[BANK.P1 * 16 + i + 1] = to555(c); palette[BANK.P2 * 16 + i + 1] = to555(c) })
+
+// night lighting: each stage re-lights the courtyard banks (stone, gate, palms, floor, banners)
+const COURT_BANKS = [BANK.STONE, BANK.GATE, BANK.PALM, BANK.FLOOR, BANK.BANNER]
+function courtWords([mr, mg, mb, sat]) {
+  const out = []
+  for (const b of COURT_BANKS) for (let i = 0; i < 16; i++) {
+    const c = palette[b * 16 + i]
+    if (i === 0) { out.push(c); continue }
+    const rgb = [c & 31, (c >> 5) & 31, (c >> 10) & 31], l = (rgb[0] * 0.3 + rgb[1] * 0.55 + rgb[2] * 0.15)
+    const [r, g, bl] = rgb.map((v, k) => Math.max(0, Math.min(31, Math.round((l + (v - l) * sat) * [mr, mg, mb][k]))))
+    out.push((bl << 10) | (g << 5) | r)
+  }
+  return out
+}
 
 // ---------- write ----------
 const le16 = arr => { const b = Buffer.alloc(arr.length * 2); arr.forEach((v, i) => b.writeUInt16LE(v, i * 2)); return b }
@@ -457,12 +600,13 @@ const files = {
   'tiles.bin': Buffer.from(tiles.subarray(0, tileBytes)),
   'maps.bin': Buffer.concat([Buffer.from(map0.buffer), Buffer.from(map1.buffer)]),
   'pal.bin': le16([...palette]),
-  'stages.bin': Buffer.concat(STAGES.map(st => le16([...skyLines(st.sky), ...st.bank.map(c => to555(hex(c)))]))),
+  'stages.bin': Buffer.concat(STAGES.map(st => le16([...skyLines(st.sky), ...st.bank.map(c => to555(hex(c))), ...courtWords(st.tint)]))),
   'bodies.bin': Buffer.concat(bodyBlobs.map(b => Buffer.from(b))),
+  'cart.bin': Buffer.concat([Buffer.from(cartPal.buffer), Buffer.from(cartBlob)]),
 }
 const stageRecordBytes = files['stages.bin'].length / STAGES.length
 if (require.main === module) {
   for (const [name, buf] of Object.entries(files)) fs.writeFileSync(path.join(__dirname, name), buf)
   console.log(`swornrivals art: ${topTile} tiles (${topTile - T.BG_BASE} background), ${POSES.length} poses x ${BODIES.length} bodies, stage record ${stageRecordBytes} bytes`)
 }
-module.exports = { T, BANK, POSE, POSES, BODIES, RIVALS, TITLE, files, tileCount: topTile, stageRecordBytes, bodyBytes: POSES.length * POSE_BYTES, nStages: STAGES.length }
+module.exports = { COURT_BANKS, HOME, T, BANK, POSE, POSES, BODIES, ROSTER, RIVALS, TITLE, cartFrames, CART, files, tileCount: topTile, stageRecordBytes, bodyBytes: POSES.length * POSE_BYTES, nStages: STAGES.length }

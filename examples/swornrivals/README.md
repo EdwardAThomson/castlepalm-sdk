@@ -17,15 +17,24 @@ Nothing on screen shows which oath was sworn; the round-end screen reveals both.
 | Controls | |
 | --- | --- |
 | **Left / Right** | walk (hold away to block) |
-| **Down** | crouch |
+| **Down** | crouch (down + away blocks low) |
 | **Up** | jump |
-| **A / B** | punch / kick |
-| **↓ ↘ → + A** | Gate Rush |
-| **→ ↓ ↘ + A** | Palm Rise |
+| **A / X** | light / heavy punch |
+| **B / Y** | light / heavy kick |
+| **Fwd or Back + X**, up close | throw |
+| **Motion + button** | the character's specials (QCF+P, DP+P, QCB+P, QCB+K, DP+K) |
 | **↓ ↘ → + B** | Oath Surge (full meter) |
 
-**1P Arcade** is a ladder of four CPU rivals; **2P Versus** puts player 2 on
-`INPUT1`.
+There are eight characters, each with their own specials, epithet, home stage and win
+quote. The game also has chains and special cancels, combos with damage scaling, stun,
+and chip damage.
+
+- **1P Arcade:** pick a character, then climb a ladder of four CPU rivals, with a
+  wreck-the-cart bonus stage after the second. Each character has their own ending.
+- **2P Versus:** both players pick on one select screen; player 2 uses `INPUT1`.
+- **Training:** an endless round against a dummy. Start cycles the dummy through
+  stand, crouch, jump, guard, CPU, record and play. Holding Start quits.
+- Leave the title alone for 15 seconds and a CPU-vs-CPU demo plays.
 
 ## Build & run
 
@@ -43,7 +52,7 @@ Then open `play.html` and pick **Sworn Rivals**, or drag `swornrivals.cpc` on.
 
 ## How it works
 
-- **Streamed fighter frames.** Eight bodies × 17 poses of 64×64 art would never fit
+- **Streamed fighter frames.** Eight bodies × 22 poses of 64×64 art would never fit
   in VRAM at once, so they live in the cart (`bodies.bin`) and each frame the cart
   DMAs the current pose of each fighter into its own 64-tile VRAM slot (4 KB a
   frame). This is the main technique the example shows.
@@ -54,5 +63,10 @@ Then open `play.html` and pick **Sworn Rivals**, or drag `swornrivals.cpc` on.
   courtyard with the HUD in its top rows. The hblank handler paints a per-line sky
   gradient into palette entry 0 and holds BG1 unscrolled for the HUD, like Street
   Brawl.
+- **Stages and lighting.** Each stage record holds a sky gradient plus the courtyard
+  colour banks re-lit for the time of day, DMA'd together, so night stages darken
+  the whole scene.
+- **Sound.** The APU has no envelopes, so square 0 steps through short per-frame
+  pitch and volume sequences (`SFXDATA`) for each kind of special.
 - **Art.** `gen_art.js` draws the courtyard, HUD and fonts and renders every body in
   the extra fighting poses of `examples/streetbrawl/rig.js`.

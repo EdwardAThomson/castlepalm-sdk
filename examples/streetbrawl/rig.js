@@ -139,6 +139,12 @@
     if (pose === 'airpunch') { legs = tuck; arms = punchArms; lean = 2 }
     if (pose === 'airkick') { legs = [{ th: 0.6, sh: -1.1 }, { th: 1.05, sh: 1.0 }]; arms = [{ up: -0.4, fo: 0.6 }, { up: 0.9, fo: 2.4 }]; lean = -3; hipDx = -6 }
     if (pose === 'rise') { legs = [{ th: -0.15, sh: -0.1 }, { th: 1.35, sh: 0.1 }]; arms = [{ up: -0.5, fo: 0.3 }, { up: 2.75, fo: 3.0 }]; lean = 1.5 }
+    const lunge = [{ th: -0.5, sh: -0.3 }, { th: 0.6, sh: 0.3 }]
+    if (pose === 'hpunch') { legs = lunge; arms = [{ up: 0.15, fo: 1.9 }, { up: 1.62, fo: 1.6 }]; lean = 4.5; hipDx = 2 }
+    if (pose === 'hkick') { legs = [{ th: -0.3, sh: -0.15 }, { th: 2.05, sh: 2.3 }]; arms = [{ up: -0.7, fo: 0.1 }, { up: 1.2, fo: 2.6 }]; lean = -5; hipDx = -8 }
+    if (pose === 'clinch') { legs = lunge; arms = [{ up: 1.25, fo: 1.45 }, { up: 1.4, fo: 1.5 }]; lean = 3; hipDx = 1 }
+    if (pose === 'fire') { legs = lunge; arms = [{ up: 1.35, fo: 1.5 }, { up: 1.5, fo: 1.58 }]; lean = 2.5; stoop = 0.94 }
+    if (pose === 'dizzy') { legs = [{ th: 0.45, sh: -0.3 }, { th: 0.75, sh: -0.15 }]; arms = [{ up: -0.35, fo: -0.25 }, { up: 0.35, fo: 0.15 }]; lean = -3.5; hipDx = 2; stoop = 0.92 }
     // Street Brawl grappling: hold a thug by the collar, drive a knee up, heave him away
     if (pose === 'grab') { legs = stance; arms = [{ up: 1.35, fo: 1.75 }, { up: 1.5, fo: 1.45 }]; lean = 1.5 }
     if (pose === 'knee') { legs = [{ th: -0.12, sh: -0.08 }, { th: 1.55, sh: -0.35 }]; arms = [{ up: 1.1, fo: 0.6 }, { up: 1.25, fo: 0.45 }]; lean = 2.5 }

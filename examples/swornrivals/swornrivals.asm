@@ -8,9 +8,15 @@
 ;   powers the Oath Surge super.
 ;
 ;   Controls:  Left/Right walk (away = block)  Down crouch  Up jump
-;              A punch  B kick
-;              Down, Down-fwd, Fwd + A  Gate Rush      Fwd, Down, Down-fwd + A  Palm Rise
-;              Down, Down-fwd, Fwd + B  Oath Surge (full meter)
+;              A light punch  X heavy punch  B light kick  Y heavy kick
+;              Fwd/Back + X up close  throw (both throwing at once: a tech, nobody falls)
+;              Down, Down-fwd, Fwd + punch    Seal Bolt (projectile; X is the fast one)
+;              Fwd, Down, Down-fwd + punch    Palm Rise
+;              Down, Down-back, Back + punch  Gate Rush
+;              Down, Down-fwd, Fwd + kick     Oath Surge (full meter)
+;   Light attacks chain into light attacks and most normals cancel into specials on
+;   contact; a run of hits is a combo (counted on screen, damage scales from hit 3).
+;   Taking damage fast builds stun: past DIZMAX the fighter is dizzy until it wears off.
 ;   1P Arcade: a ladder of four CPU rivals. 2P Versus: player 2 on INPUT1.
 ;
 ;   Art: examples/swornrivals/gen_art.js draws the courtyard, HUD, fonts and every body in 17
@@ -97,6 +103,9 @@ TITLE     EQU 512
 SPARK     EQU 688
 BSPARK    EQU 696
 SHADOW    EQU 704
+BOLT      EQU 720
+STARS     EQU 728
+PORT      EQU 736
 ; ---- palette banks ----
 PB_HUD    EQU 0
 PB_FONT   EQU 3
@@ -106,6 +115,7 @@ PB_P2     EQU 8
 PB_P1     EQU 9
 PB_BIG    EQU 12
 PB_TITLE  EQU 13
+PB_STATUE EQU 14
 PB_SHADOW EQU 15
 SZ16      EQU $10
 SZ32      EQU $20
@@ -128,8 +138,14 @@ PO_HURT   EQU 13
 PO_DOWN   EQU 14
 PO_RISE   EQU 15
 PO_WIN    EQU 16
-NPOSE     EQU 17
-STAGEREC  EQU 472         ; bytes per stage record (224-word sky + 12-word bank 1)
+PO_HPUNCH EQU 17
+PO_HKICK  EQU 18
+PO_GRAB   EQU 19
+PO_FIRE   EQU 20
+PO_DIZZY  EQU 21
+NPOSE     EQU 22
+BODYSZ    EQU 45056       ; NPOSE * 2048 bytes per body
+STAGEREC  EQU 632         ; bytes per stage record (224-word sky, 12-word bank 1, 80 words of courtyard banks)
 NBODY     EQU 8
 
 ; ---- tuning ----
@@ -153,6 +169,11 @@ MOTIONW   EQU 16          ; motion input window (frames)
 ROUNDSECS EQU 60
 OATHT     EQU 480         ; oath screen clock
 HUDLINES  EQU 24
+DIZMAX    EQU 40          ; stun points that make a fighter dizzy
+DIZT      EQU 110         ; dizzy frames (mashing shortens it)
+THROWR    EQU 40          ; throw range (centre to centre)
+CXLWIN    EQU 6           ; recovery frames that can still be cancelled
+BOLTY     EQU 34          ; Seal Bolt height above the floor
 ; ---- fighter states ----
 ST_IDLE   EQU 0
 ST_CROUCH EQU 1
@@ -163,6 +184,7 @@ ST_HURT   EQU 5
 ST_DOWN   EQU 6
 ST_KO     EQU 7
 ST_WIN    EQU 8
+ST_DIZZY  EQU 9
 ; ---- attacks (ATKTAB rows) ----
 AK_PUNCH  EQU 0
 AK_KICK   EQU 1
@@ -173,6 +195,25 @@ AK_AKICK  EQU 5
 AK_RUSH   EQU 6
 AK_RISE   EQU 7
 AK_SURGE  EQU 8
+AK_HPUNCH EQU 9
+AK_HKICK  EQU 10
+AK_CHPUNCH EQU 11
+AK_CLK    EQU 12
+AK_AHPUNCH EQU 13
+AK_AHKICK EQU 14
+AK_BOLTL  EQU 15
+AK_BOLTH  EQU 16
+AK_THROW  EQU 17
+AK_BTHROW EQU 18
+AK_NEEDLEL EQU 19         ; character specials (CHSPEC picks which a fighter has)
+AK_NEEDLEH EQU 20
+AK_EMBERL EQU 21
+AK_EMBERH EQU 22
+AK_RAM    EQU 23
+AK_LARK   EQU 24
+AK_WHEEL  EQU 25
+AK_CRUSH  EQU 26
+AK_BELL   EQU 27
 ; ATKTAB record fields
 AT_S      EQU 0           ; startup
 AT_A      EQU 1           ; active
@@ -197,6 +238,14 @@ AF_INV    EQU 8           ; invulnerable during startup
 AF_RISE   EQU 16          ; lifts off at the first active frame
 AF_GROUND EQU 32          ; a ground attack (breaks Sky Striker)
 AF_AIR    EQU 64          ; stays active until landing
+AT_FL2    EQU 16          ; more flags (rows are 32 bytes)
+AT_ALT    EQU 17          ; multi-hit attacks alternate AT_P1 with this pose
+F2_CHAIN  EQU 1           ; a light normal: chains into light normals on contact
+F2_CXL    EQU 2           ; cancels into a special on contact
+F2_SPEC   EQU 4           ; a special: chip damage when blocked
+F2_PROJ   EQU 8           ; fires a Seal Bolt (AT_DASH = speed) instead of hitting
+F2_THROW  EQU 16          ; a throw: unblockable, needs a grounded rival in range
+F2_BACK   EQU 32          ; a back throw: the rival lands behind
 ; ---- oaths ----
 OA_NONE   EQU 0
 OA_GUARD  EQU 1           ; No Guard
@@ -212,6 +261,11 @@ G_FIGHT   EQU 4
 G_KO      EQU 5
 G_MATCH   EQU 6
 G_CHAMP   EQU 7
+G_SELECT  EQU 8
+G_VS      EQU 9
+G_BONUSEND EQU 10
+CARTBODY  EQU 8           ; the bonus-stage cart streams as body 8 (BODYTAB / NAMETAB)
+BONUSSECS EQU 30
 NRIVAL    EQU 4
 ; ---- creator layout (as Street Brawl) ----
 CP_HAIR  EQU 36
@@ -272,12 +326,19 @@ FAIATK EQU 106            ; CPU's chosen attack + 1 (0 = none)
 FID    EQU 108            ; 0 = P1, 1 = P2
 FCRCH  EQU 110
 FAIHOLD EQU 112
+FPJT   EQU 114            ; Seal Bolt: frames alive (0 = none)
+FPJX   EQU 116            ; world x
+FPJV   EQU 118            ; px/f, signed
+FPJA   EQU 120            ; attack row that fired it
+FDIZ   EQU 122            ; stun points
+FCMB   EQU 124            ; hits in this fighter's current combo
+FAICX  EQU 126            ; CPU: follow-up already decided for this attack
 F1     EQU $000200
 F2     EQU $000280
 
 ; ---- RAM ----
 gstate   EQU $000100
-mode     EQU $000102      ; 0 arcade, 1 versus
+mode     EQU $000102      ; 0 arcade, 1 versus, 2 training, 3 attract demo
 in0      EQU $000104
 in0p     EQU $000106
 in1      EQU $000108
@@ -321,6 +382,45 @@ surgeT   EQU $000152
 tmpx     EQU $000154
 picks    EQU $000160      ; P1 picks (6) then P2 picks (6)
 tpick    EQU $000170      ; scratch copy for applypicks
+cmbT     EQU $000180      ; combo banner frames, P1 then P2 (words)
+cmbN     EQU $000184      ; combo banner hit count, P1 then P2
+techT    EQU $000188      ; "TECH" banner frames
+cmbstr   EQU $00018A      ; "nn HITS" built at runtime (8 bytes)
+latch    EQU $000192      ; presses made during hit freeze, P1 then P2 (words)
+selp1    EQU $000196      ; select cursors (fighter index), P1 then P2
+selp2    EQU $000198
+selok1   EQU $00019A      ; select confirmed, P1 then P2 (must follow selp1/selp2)
+selok2   EQU $00019C
+selT     EQU $00019E      ; beat after both confirm
+bonus    EQU $0001A0      ; 1 while the bonus stage runs
+bonusnx  EQU $0001A2      ; the next arcade match is the bonus stage
+score    EQU $0001A4
+numstr   EQU $0001A6      ; decimal digits built at runtime (6 bytes)
+rpick    EQU $0001AC      ; the rival's picks (6 bytes)
+dmode    EQU $0001B2      ; training: dummy 0 stand, 1 crouch, 2 jump, 3 guard, 4 CPU
+stT      EQU $0001B4      ; training: frames Start has been held
+lastdmg  EQU $0001B6      ; training: damage of the last combo on the dummy
+freeT    EQU $0001B8      ; training: frames the dummy has been free
+ilast    EQU $0001BA      ; training: last recorded direction
+sfxP     EQU $0001DC      ; sound sequence: byte offset into SFXDATA (0 = none)
+slowT    EQU $0001DE      ; KO slow motion frames left
+lbuf     EQU $0001E0      ; one line of an ending (32 bytes)
+ihist    EQU $0001C0      ; training: P1 input history, newest first (8 words: dir | buttons)
+istr     EQU $0001D0      ; training: one history line (12 bytes)
+SX_RISE  EQU 1
+SX_BOLT  EQU 2
+SX_RUSH  EQU 3
+SX_SMASH EQU 4
+SX_SUPER EQU 5
+SX_KO    EQU 6
+SX_BLOCK EQU 7
+SX_THROW EQU 8
+recbuf   EQU $001000      ; training: the recorded dummy pads, relative to facing (240 words)
+recN     EQU $001200      ; training: frames recorded
+recP     EQU $001202      ; training: playback position
+dpick    EQU $001204      ; attract demo: P1's picks (6 bytes)
+demoT    EQU $00120A      ; attract demo: frames shown
+idleT    EQU $00120C      ; title: frames without a press
 SKYTAB   EQU $000400
 CHARPAL  EQU $000600
 
@@ -355,6 +455,11 @@ start:
 
 mainloop:
   CALL readpads
+  LDW R0, [mode]
+  CMP R0, #3
+  BNE ml_go
+  CALL demotick
+ml_go:
   LDW R0, [gstate]
   MOV R1, R0
   SHL R1, #1
@@ -381,6 +486,7 @@ ml_sleep:
 
 GSTAB:
   DA titleframe, creatorframe, oathframe, introframe, fightframe, koframe, matchframe, champframe
+  DA selectframe, vsframe, bonusendframe
 
 ; ---- hblank: sets up the NEXT line: sky colour, and BG1 scroll (0 over the HUD) ----
 hblank:
@@ -513,6 +619,10 @@ resetfighter:
   STW R0, [A2+#FPADP]
   STW R0, [A2+#FDIR]
   STW R0, [A2+#FPOSE]
+  STW R0, [A2+#FPJT]
+  STW R0, [A2+#FDIZ]
+  STW R0, [A2+#FCMB]
+  STW R0, [A2+#FAICX]
   MOV R0, #20
   STW R0, [A2+#FTHINK]
   MOV R0, #HP0
@@ -540,6 +650,11 @@ resetround:
   STW R0, [brkT]
   STW R0, [sparkT]
   STW R0, [surgeT]
+  STW R0, [techT]
+  STW R0, [cmbT]
+  STW R0, [cmbT+2]
+  STW R0, [latch]
+  STW R0, [latch+2]
   MOV R0, #3
   STW R0, [show]
   RET
@@ -652,6 +767,46 @@ setuprival:
   LDA A0, #RIVTAB
   ADD A0, R0
   PUSHA A0
+  LDA A1, #rpick           ; copy, so a mirror match can swap colours
+  MOV R2, #6
+sr_cp:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sr_cp
+  LDA A0, #picks           ; the player in the rival's exact colours? rival takes its alt
+  LDA A1, #rpick
+  MOV R2, #6
+sr_eq:
+  LDB R0, [A0]
+  LDB R1, [A1]
+  CMP R0, R1
+  BNE sr_ap
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sr_eq
+  LDB R0, [rpick]
+  MOV R3, R0
+  SHL R3, #3
+  ADD R3, R0
+  ADD R3, R0
+  ADD R3, #5
+  LDA A0, #CHARCOL
+  ADD A0, R3
+  LDA A1, #rpick+1
+  MOV R2, #5
+sr_alt:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE sr_alt
+sr_ap:
+  LDA A0, #rpick
   LDA A1, #F2
   CALL applypicks
   POPA A0
@@ -660,15 +815,1200 @@ setuprival:
   STW R0, [A2+#FAI]
   MOV R0, #1
   STW R0, [A2+#FCPU]
-  LDW R0, [rival]
-  CALL setstage
+  LDW R0, [A2+#FBODY]      ; the rival's home stage
+  CALL homestage
   RET
+
+; ============================ character select ============================
+; ---- initselect(R0 = 1 fresh, 0 back from tailoring): portraits, previews ----
+initselect:
+  CMP R0, #0
+  BEQ is_keep
+  MOV R0, #0
+  STW R0, [selok1]
+  STW R0, [selok2]
+is_keep:
+  MOV R0, #G_SELECT
+  STW R0, [gstate]
+  MOV R0, #0
+  STW R0, [cam]
+  STW R0, [gT]
+  STW R0, [selT]
+  STW R0, [bonus]
+  LDB R0, [picks]
+  STW R0, [selp1]
+  LDB R0, [picks+6]
+  STW R0, [selp2]
+  CALL copymaps
+  CALL clearhud
+  MOV R4, #9
+  MOV R5, #3
+  MOV R6, #31
+  MOV R7, #23
+  CALL panel
+  CALL applyp1
+  CALL applyp2
+  LDA A2, #F1
+  MOV R0, #36
+  MOV R1, #0
+  CALL resetfighter
+  LDA A2, #F2
+  MOV R0, #284
+  MOV R1, #1
+  CALL resetfighter
+  MOV R0, #1
+  LDW R1, [mode]
+  CMP R1, #0
+  BEQ is_sh
+  MOV R0, #3
+is_sh:
+  STW R0, [show]
+  RET
+
+selectframe:
+  LDW R0, [gT]
+  ADD R0, #1
+  STW R0, [gT]
+  LDW R0, [selok1]         ; training: the dummy is picked once P1 is done
+  PUSH R0
+  MOV R4, #0
+  CALL selside
+  POP R0
+  LDW R1, [mode]
+  CMP R1, #0
+  BEQ sf_chk
+  CMP R1, #2
+  BNE sf_s2
+  CMP R0, #0
+  BEQ sf_chk
+sf_s2:
+  MOV R4, #1
+  CALL selside
+sf_chk:
+  LDW R0, [selok1]
+  CMP R0, #0
+  BEQ sf_draw
+  LDW R0, [mode]
+  CMP R0, #0
+  BEQ sf_beat
+  LDW R0, [selok2]
+  CMP R0, #0
+  BEQ sf_draw
+sf_beat:
+  LDW R0, [selT]           ; a short beat on the win poses, then the match
+  ADD R0, #1
+  STW R0, [selT]
+  CMP R0, #40
+  BLT sf_draw
+  CALL mirrorfix
+  CALL savepicks
+  CALL newmatch
+  RET
+sf_draw:
+  LDA A2, #F1
+  LDW R0, [selok1]
+  CALL selpose
+  LDA A2, #F2
+  LDW R0, [selok2]
+  CALL selpose
+  CALL oambegin
+  MOV R0, #6
+  STW R0, [sprpri]
+  MOV R1, #6
+  LDA A1, #sCHOOSE
+  CALL cbig
+  MOV R4, #0
+sf_port:
+  PUSH R4
+  MOV R0, R4               ; x = 84 + col * 40, y = 36 + row * 40
+  AND R0, #3
+  MOV R1, R0
+  SHL R0, #5
+  SHL R1, #3
+  ADD R0, R1
+  ADD R0, #84
+  MOV R1, R4
+  SHR R1, #2
+  MOV R2, R1
+  SHL R1, #5
+  SHL R2, #3
+  ADD R1, R2
+  ADD R1, #36
+  MOV R6, #PB_STATUE       ; stone, unless a cursor is on it
+  LDW R2, [mode]
+  CMP R2, #0
+  BEQ sf_p1c
+  LDW R2, [selp2]
+  CMP R2, R4
+  BNE sf_p1c
+  MOV R6, #PB_P2
+  PUSH R0
+  PUSH R1
+  ADD R0, #33
+  ADD R1, #12
+  LDW R2, [selok2]
+  LDA A1, #sTWO
+  CALL sellabel
+  POP R1
+  POP R0
+sf_p1c:
+  LDW R2, [selp1]
+  CMP R2, R4
+  BNE sf_pe
+  MOV R6, #PB_P1
+  PUSH R0
+  PUSH R1
+  SUB R0, #9
+  ADD R1, #12
+  LDW R2, [selok1]
+  LDA A1, #sONE
+  CALL sellabel
+  POP R1
+  POP R0
+  MOV R6, #PB_P1
+sf_pe:
+  OR R6, #SZ32
+  MOV R5, R4
+  SHL R5, #4
+  ADD R5, #PORT
+  CALL emittile
+  POP R4
+  ADD R4, #1
+  CMP R4, #NBODY
+  BGE sf_pdone
+  JMP sf_port
+sf_pdone:
+  LDW R0, [mode]
+  CMP R0, #0
+  BNE sf_two
+  LDW R0, [selp1]          ; 1P: name, title and specials of the fighter under the cursor
+  CALL fdata
+  PUSHA A0
+  MOV R1, #114
+  CALL cbig
+  POPA A0
+  LDADDR A1, [A0]
+  MOV R1, #134
+  CALL ctext
+  LDW R0, [selp1]
+  MOV R1, #146
+  CALL movelist
+  BRA sf_hint
+sf_two:
+  LDW R0, [selp1]          ; versus: both names
+  CALL fdata
+  MOV R0, #76
+  MOV R1, #114
+  CALL btext
+  LDW R0, [selp2]
+  CALL fdata
+  CALL strlen
+  SHL R0, #4
+  NEG R0
+  ADD R0, #244
+  MOV R1, #134
+  CALL btext
+sf_hint:
+  LDW R0, [mode]
+  CMP R0, #2
+  BNE sf_h
+  MOV R1, #200
+  LDA A1, #sTSEL1
+  LDW R0, [selok1]
+  CMP R0, #0
+  BEQ sf_th
+  LDA A1, #sTSEL2
+sf_th:
+  CALL ctext
+sf_h:
+  MOV R1, #212
+  LDA A1, #sSELHINT
+  CALL ctext
+  CALL drawfighters
+  RET
+
+; ---- sellabel(R0, R1, A1 = "1"/"2", R2 = confirmed): blinks until confirmed ----
+sellabel:
+  CMP R2, #0
+  BNE sl1_on
+  LDW R2, [gT]
+  AND R2, #16
+  BNE sl1_off
+sl1_on:
+  PUSH R6
+  CALL stext
+  POP R6
+sl1_off:
+  RET
+
+; ---- selpose(A2, R0 = confirmed): win pose once picked ----
+selpose:
+  MOV R1, #PO_GUARD
+  CMP R0, #0
+  BEQ sp1_set
+  MOV R1, #PO_WIN
+sp1_set:
+  STW R1, [A2+#FPOSE]
+  RET
+
+; ---- fdata(R0 = fighter) -> A1 = name, A0 = its EPITAB entry ----
+fdata:
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #NAMETAB
+  ADD A0, R1
+  LDADDR A1, [A0]
+  LDA A0, #EPITAB
+  ADD A0, R1
+  RET
+
+; ---- movelist(R0 = fighter, R1 = y): three centred special lines ----
+movelist:
+  MOV R2, R0
+  SHL R2, #3
+  ADD R2, R0               ; * 9 (three DA entries)
+  LDA A0, #MOVETAB
+  ADD A0, R2
+  MOV R4, #3
+ml1_lp:
+  PUSH R1
+  PUSH R4
+  PUSHA A0
+  LDADDR A1, [A0]
+  CALL ctext
+  POPA A0
+  POP R4
+  POP R1
+  ADD A0, #3
+  ADD R1, #10
+  SUB R4, #1
+  BNE ml1_lp
+  RET
+
+; ---- selside(R4 = 0 P1 / 1 P2): move, pick (A main, B alt, Start as is), Y tailor ----
+selside:
+  MOV R0, R4
+  SHL R0, #1
+  LDA A1, #selp1
+  ADD A1, R0
+  LDW R0, [A1+#4]
+  CMP R0, #0
+  BEQ ss1_live
+  RET
+ss1_live:
+  LDW R1, [e0]
+  CMP R4, #0
+  BEQ ss1_pad
+  LDW R2, [mode]           ; training: pad 1 also picks the dummy
+  CMP R2, #2
+  BEQ ss1_pad
+  LDW R1, [e1]
+ss1_pad:
+  LDW R0, [A1]
+  MOV R2, R1
+  AND R2, #LEFT
+  BEQ ss1_r
+  MOV R3, R0
+  AND R3, #4
+  SUB R0, #1
+  AND R0, #3
+  OR R0, R3
+  BRA ss1_mv
+ss1_r:
+  MOV R2, R1
+  AND R2, #RIGHT
+  BEQ ss1_ud
+  MOV R3, R0
+  AND R3, #4
+  ADD R0, #1
+  AND R0, #3
+  OR R0, R3
+  BRA ss1_mv
+ss1_ud:
+  MOV R2, R1
+  AND R2, #UP+DOWN
+  BEQ ss1_btn
+  XOR R0, #4
+ss1_mv:
+  STW R0, [A1]
+  MOV R2, #0
+  CALL selset
+  MOV R0, #200
+  CALL sfxblip
+  RET
+ss1_btn:
+  MOV R2, R1
+  AND R2, #YBTN
+  BEQ ss1_a
+  STW R4, [cwho]           ; tailor this fighter's colours in the creator
+  CALL initcreator
+  RET
+ss1_a:
+  MOV R2, R1
+  AND R2, #ABTN
+  BEQ ss1_b
+  MOV R2, #0
+  BRA ss1_pick
+ss1_b:
+  MOV R2, R1
+  AND R2, #BBTN
+  BEQ ss1_st
+  MOV R2, #1
+ss1_pick:
+  LDW R0, [A1]
+  PUSHA A1
+  CALL selset
+  POPA A1
+  BRA ss1_ok
+ss1_st:
+  AND R1, #START
+  BEQ ss1_ret
+ss1_ok:
+  MOV R0, #1
+  STW R0, [A1+#4]
+  MOV R0, #120
+  CALL sfxblip
+ss1_ret:
+  RET
+
+; ---- selset(R4 = side, R0 = fighter, R2 = 0 main / 1 alt colours): picks + fighter ----
+selset:
+  MOV R3, R4               ; picks + side * 6
+  SHL R3, #1
+  MOV R5, R3
+  SHL R5, #1
+  ADD R3, R5
+  LDA A0, #picks
+  ADD A0, R3
+  PUSHA A0
+  STB R0, [A0]
+  INC A0
+  MOV R3, R0               ; CHARCOL + fighter * 10 (+5 for alt)
+  SHL R3, #3
+  ADD R3, R0
+  ADD R3, R0
+  CMP R2, #0
+  BEQ ss2_m
+  ADD R3, #5
+ss2_m:
+  LDA A1, #CHARCOL
+  ADD A1, R3
+  MOV R2, #5
+ss2_cp:
+  LDB R0, [A1]
+  STB R0, [A0]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE ss2_cp
+  POPA A0
+  LDA A1, #F1
+  CMP R4, #0
+  BEQ ss2_ap
+  LDA A1, #F2
+ss2_ap:
+  PUSH R4
+  CALL applypicks
+  POP R4
+  RET
+
+; ---- mirrorfix: versus with identical fighters -> P2 takes the other colours ----
+mirrorfix:
+  LDW R0, [mode]
+  CMP R0, #0
+  BEQ mx_ret
+  LDA A0, #picks
+  LDA A1, #picks+6
+  MOV R2, #6
+mx_lp:
+  LDB R0, [A0]
+  LDB R1, [A1]
+  CMP R0, R1
+  BNE mx_ret
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE mx_lp
+  LDB R0, [picks]          ; P1 in the alt colours? then P2 gets main
+  MOV R3, R0
+  SHL R3, #3
+  ADD R3, R0
+  ADD R3, R0
+  ADD R3, #5
+  LDA A1, #CHARCOL
+  ADD A1, R3
+  LDA A0, #picks+1
+  MOV R2, #1
+  MOV R4, #5
+mx_alt:
+  LDB R1, [A0]
+  LDB R3, [A1]
+  CMP R1, R3
+  BEQ mx_n
+  MOV R2, #0
+mx_n:
+  INC A0
+  INC A1
+  SUB R4, #1
+  BNE mx_alt
+  XOR R2, #1
+  MOV R4, #1
+  LDB R0, [picks]
+  CALL selset
+mx_ret:
+  RET
+
+; ============================ VS screen ============================
+initvs:
+  MOV R0, #G_VS
+  STW R0, [gstate]
+  MOV R0, #0
+  STW R0, [gT]
+  STW R0, [cam]
+  CALL copymaps
+  CALL clearhud
+  MOV R4, #0
+  MOV R5, #3
+  MOV R6, #40
+  MOV R7, #17
+  CALL panel
+  LDA A2, #F1
+  MOV R0, #52
+  MOV R1, #0
+  CALL resetfighter
+  LDA A2, #F2
+  MOV R0, #268
+  MOV R1, #1
+  CALL resetfighter
+  MOV R0, #3
+  STW R0, [show]
+  MOV R0, #90
+  CALL sfxblip
+  RET
+
+vsframe:
+  LDW R0, [gT]
+  ADD R0, #1
+  STW R0, [gT]
+  CMP R0, #180
+  BGE vs_go
+  CMP R0, #20
+  BLT vs_draw
+  CALL anyedge
+  AND R0, #START
+  BEQ vs_draw
+vs_go:
+  CALL copymaps
+  CALL clearhud
+  CALL initoath
+  RET
+vs_draw:
+  CALL idleposes
+  CALL oambegin
+  MOV R0, #6
+  STW R0, [sprpri]
+  LDA A2, #F1              ; P1: name, title, specials on the left
+  LDW R0, [A2+#FBODY]
+  CALL fdata
+  PUSHA A0
+  MOV R0, #16
+  MOV R1, #28
+  CALL btext
+  POPA A0
+  LDADDR A1, [A0]
+  MOV R0, #16
+  MOV R1, #48
+  CALL stext
+  LDA A2, #F2              ; P2 on the right, right-aligned
+  LDW R0, [A2+#FBODY]
+  CALL fdata
+  PUSHA A0
+  PUSHA A1
+  CALL strlen
+  POPA A1
+  SHL R0, #4
+  NEG R0
+  ADD R0, #304
+  MOV R1, #28
+  CALL btext
+  POPA A0
+  LDADDR A1, [A0]
+  PUSHA A1
+  CALL strlen
+  POPA A1
+  SHL R0, #3
+  NEG R0
+  ADD R0, #304
+  MOV R1, #48
+  CALL stext
+  MOV R0, #128             ; VS from the title letters (V = 7, S = 0)
+  MOV R1, #66
+  MOV R5, #TITLE+112
+  MOV R6, #SZ32
+  OR R6, #PB_TITLE
+  CALL emittile
+  MOV R0, #160
+  MOV R1, #66
+  MOV R5, #TITLE
+  CALL emittile
+  LDA A2, #F1
+  LDW R0, [A2+#FBODY]
+  MOV R1, #104
+  MOV R4, #8
+  CALL vsmoves
+  LDA A2, #F2
+  LDW R0, [A2+#FBODY]
+  MOV R1, #104
+  MOV R4, #168
+  CALL vsmoves
+  CALL drawfighters
+  RET
+
+; ---- vsmoves(R0 = fighter, R1 = y, R4 = x): its three special lines ----
+vsmoves:
+  CMP R0, #NBODY
+  BGE vm_ret
+  MOV R2, R0
+  SHL R2, #3
+  ADD R2, R0
+  LDA A0, #MOVETAB
+  ADD A0, R2
+  MOV R3, #3
+vm_lp:
+  PUSH R1
+  PUSH R3
+  PUSH R4
+  PUSHA A0
+  LDADDR A1, [A0]
+  MOV R0, R4
+  CALL stext
+  POPA A0
+  POP R4
+  POP R3
+  POP R1
+  ADD A0, #3
+  ADD R1, #10
+  SUB R3, #1
+  BNE vm_lp
+vm_ret:
+  RET
+
+; ============================ bonus stage ============================
+initbonus:
+  MOV R0, #1
+  STW R0, [bonus]
+  STW R0, [round]
+  CALL applyp1
+  LDA A2, #F1
+  MOV R0, #0
+  STW R0, [A2+#FCPU]
+  LDA A2, #F2
+  STW R0, [A2+#FCPU]
+  STW R0, [A2+#FSPD]
+  STW R0, [A2+#FDMGB]
+  STW R0, [A2+#FARMR]
+  STW R0, [A2+#FREACH]
+  MOV R0, #CARTBODY
+  STW R0, [A2+#FBODY]
+  LDA A0, #cartdata+2      ; the cart's colours into P2's bank
+  MOV R0, #PB_P2
+  SHL R0, #5
+  ADD R0, #2
+  MOV R1, #30
+  CALL dmapal
+  MOV R0, #0
+  CALL setstage
+  CALL copymaps
+  CALL clearhud
+  CALL resetround
+  MOV R0, #BONUSSECS
+  STW R0, [timer]
+  CALL initintro
+  RET
+
+; ---- bonusstep: the cart stays put, shows its damage, and ends the stage ----
+bonusstep:
+  LDA A2, #F2
+  MOV R0, #316
+  STW R0, [A2+#FX]
+  MOV R0, #0
+  STW R0, [A2+#FY]
+  STW R0, [A2+#FVY]
+  STW R0, [A2+#FVX]
+  STW R0, [A2+#FPUSH]
+  STW R0, [A2+#FDIZ]
+  LDW R0, [A2+#FST]
+  CMP R0, #ST_DOWN
+  BLT bn_st
+  MOV R0, #ST_IDLE
+  STW R0, [A2+#FST]
+bn_st:
+  LDW R1, [A2+#FHP]
+  MOV R0, #0
+  CMP R1, #86
+  BGE bn_p
+  MOV R0, #1
+  CMP R1, #43
+  BGE bn_p
+  MOV R0, #2
+bn_p:
+  STW R0, [A2+#FPOSE]
+  CMP R1, #0
+  BEQ bn_end
+  LDW R0, [timer]
+  CMP R0, #0
+  BEQ bn_end
+  JMP ff_draw
+bn_end:
+  MOV R0, #G_BONUSEND
+  STW R0, [gstate]
+  MOV R0, #0
+  STW R0, [gT]
+  MOV R0, #HP0             ; score: 50 a point of damage, 200 a second left if wrecked
+  SUB R0, R1
+  MOV R2, #50
+  MULU R0, R2
+  LDW R1, [A2+#FHP]
+  CMP R1, #0
+  BNE bn_sc
+  LDW R2, [timer]
+  MOV R3, #200
+  MULU R2, R3
+  ADD R0, R2
+bn_sc:
+  STW R0, [score]
+  LDA A2, #F1
+  MOV R0, #ST_WIN
+  STW R0, [A2+#FST]
+  MOV R0, #PO_WIN
+  STW R0, [A2+#FPOSE]
+  MOV R0, #80
+  CALL sfxblip
+  RET
+
+bonusendframe:
+  LDW R0, [gT]
+  ADD R0, #1
+  STW R0, [gT]
+  CMP R0, #300
+  BGE be_go
+  CMP R0, #60
+  BLT be_draw
+  CALL anyedge
+  AND R0, #START
+  BEQ be_draw
+be_go:
+  CALL startmatch          ; on to the next rival
+  RET
+be_draw:
+  CALL oambegin
+  LDA A2, #F2
+  LDW R0, [A2+#FHP]
+  LDA A1, #sTIME
+  CMP R0, #0
+  BNE be_t
+  LDA A1, #sWRECKED
+be_t:
+  MOV R1, #48
+  CALL cbig
+  LDW R0, [score]
+  CALL utoa
+  MOV R0, #96
+  MOV R1, #72
+  LDA A1, #sBONUSPTS
+  CALL btext
+  ADD R0, #16
+  LDA A1, #numstr
+  CALL btext
+  CALL drawfighters
+  CALL drawhud
+  RET
+
+; ---- utoa(R0) -> numstr: decimal, no leading zeros ----
+utoa:
+  LDA A1, #numstr
+  LDA A0, #POW10
+  MOV R3, #0               ; a digit written yet?
+ua_p:
+  LDW R1, [A0]
+  CMP R1, #1
+  BEQ ua_last
+  MOV R2, #0
+ua_d:
+  CMP R0, R1
+  BLT ua_out
+  SUB R0, R1
+  ADD R2, #1
+  BRA ua_d
+ua_out:
+  ADD R3, R2
+  CMP R3, #0
+  BEQ ua_skip
+  ADD R2, #48
+  STB R2, [A1]
+  INC A1
+ua_skip:
+  ADD A0, #2
+  BRA ua_p
+ua_last:
+  ADD R0, #48
+  STB R0, [A1]
+  MOV R0, #0
+  STB R0, [A1+#1]
+  RET
+POW10:
+  DW 10000, 1000, 100, 10, 1
+
+; ============================ attract demo ============================
+; ---- initdemo: two random characters, CPU against CPU, on the second one's stage ----
+initdemo:
+  MOV R0, #0
+  STW R0, [idleT]
+  STW R0, [demoT]
+  STW R0, [bonus]
+  MOV R0, #3
+  STW R0, [mode]
+  CALL nextrng
+  AND R0, #7
+  PUSH R0
+  LDA A0, #dpick
+  CALL mkpick
+  CALL nextrng
+  AND R0, #7
+  POP R1
+  CMP R0, R1
+  BNE id_d
+  ADD R0, #3
+  AND R0, #7
+id_d:
+  LDA A0, #rpick
+  CALL mkpick
+  LDA A0, #dpick
+  LDA A1, #F1
+  CALL applypicks
+  LDA A0, #rpick
+  LDA A1, #F2
+  CALL applypicks
+  LDA A2, #F1
+  CALL democpu
+  LDA A2, #F2
+  CALL democpu
+  LDW R0, [A2+#FBODY]
+  CALL homestage
+  MOV R0, #1
+  STW R0, [round]
+  CALL resetround
+  JMP initintro
+democpu:
+  MOV R0, #1
+  STW R0, [A2+#FCPU]
+  MOV R0, #2
+  STW R0, [A2+#FAI]
+  MOV R0, #0
+  STW R0, [A2+#FWINS]
+  RET
+
+; ---- mkpick(A0 = 6-byte picks, R0 = fighter): that fighter in its main colours ----
+mkpick:
+  STB R0, [A0]
+  INC A0
+  MOV R1, R0
+  SHL R1, #3
+  ADD R1, R0
+  ADD R1, R0
+  LDA A1, #CHARCOL
+  ADD A1, R1
+  MOV R2, #5
+mk_cp:
+  LDB R0, [A1]
+  STB R0, [A0]
+  INC A0
+  INC A1
+  SUB R2, #1
+  BNE mk_cp
+  RET
+
+; ---- demotick: any press, or 30 seconds, ends the demo ----
+demotick:
+  LDW R0, [demoT]
+  ADD R0, #1
+  STW R0, [demoT]
+  CMP R0, #1800
+  BGE dt_end
+  CALL anyedge
+  CMP R0, #0
+  BEQ dt_ret
+dt_end:
+  JMP demoend
+dt_ret:
+  RET
+demoend:
+  MOV R0, #0
+  STW R0, [mode]
+  CALL inittitle
+  RET
+
+; ============================ training ============================
+; ---- inittrain: endless round on the courtyard, P1 vs the dummy ----
+inittrain:
+  MOV R0, #0
+  STW R0, [dmode]
+  STW R0, [stT]
+  STW R0, [lastdmg]
+  STW R0, [freeT]
+  LDA A0, #ihist
+  MOV R2, #8
+it_cl:
+  STW R0, [A0]
+  ADD A0, #2
+  SUB R2, #1
+  BNE it_cl
+  MOV R0, #5
+  STW R0, [ilast]
+  LDA A2, #F2              ; the dummy's home stage
+  LDW R0, [A2+#FBODY]
+  CALL homestage
+  CALL resetround
+  CALL trainsetdummy
+  CALL copymaps
+  CALL hudstatic
+  MOV R0, #G_FIGHT
+  STW R0, [gstate]
+  RET
+
+; ---- trainsetdummy: CPU control only in dummy mode 4 ----
+trainsetdummy:
+  LDA A2, #F2
+  MOV R0, #0
+  LDW R1, [dmode]
+  CMP R1, #4
+  BNE tsd_s
+  MOV R0, #1
+tsd_s:
+  STW R0, [A2+#FCPU]
+  MOV R0, #2
+  STW R0, [A2+#FAI]
+  MOV R0, #0
+  STW R0, [A2+#FAIPAD]
+  RET
+
+; ---- dummypad(A2 = dummy, A3 = player) -> R1 = the dummy's pad ----
+dummypad:
+  LDW R0, [dmode]
+  CMP R0, #5
+  BLT dp_std
+  BEQ dp_rec
+  MOV R1, #0               ; play: loop the recording
+  LDW R2, [recN]
+  CMP R2, #0
+  BEQ dp_out
+  LDW R0, [recP]
+  MOV R3, R0
+  SHL R3, #1
+  LDA A0, #recbuf
+  ADD A0, R3
+  LDW R1, [A0]
+  ADD R0, #1
+  CMP R0, R2
+  BLT dp_pp
+  MOV R0, #0
+dp_pp:
+  STW R0, [recP]
+  CALL flippad
+dp_out:
+  RET
+dp_rec:
+  LDW R1, [in0]            ; record: pad 1 drives the dummy (stored relative to its facing)
+  CALL flippad
+  LDW R0, [recN]
+  MOV R3, R0
+  SHL R3, #1
+  LDA A0, #recbuf
+  ADD A0, R3
+  STW R1, [A0]
+  ADD R0, #1
+  STW R0, [recN]
+  CMP R0, #240
+  BLT dp_rc
+  MOV R0, #6               ; four seconds: play it back
+  STW R0, [dmode]
+  MOV R0, #0
+  STW R0, [recP]
+dp_rc:
+  LDW R1, [in0]
+  RET
+dp_std:
+  MOV R1, #0
+  CMP R0, #1
+  BNE dp_j
+  MOV R1, #DOWN
+  RET
+dp_j:
+  CMP R0, #2
+  BNE dp_g
+  MOV R1, #UP
+  RET
+dp_g:
+  CMP R0, #3
+  BNE dp_r
+  LDW R0, [A3+#FST]        ; guard only while the player threatens (so it never walks off)
+  CMP R0, #ST_ATK
+  BEQ dp_th
+  LDW R0, [A3+#FPJT]
+  CMP R0, #0
+  BEQ dp_r
+dp_th:
+  CALL dirbits
+  MOV R1, R7
+  LDW R0, [A3+#FY]         ; a jump-in: stand to guard
+  CMP R0, #0
+  BLT dp_r
+  LDW R0, [A3+#FST]
+  CMP R0, #ST_ATK
+  BNE dp_lo
+  LDW R0, [A3+#FATK]       ; an overhead: stand; anything else: crouch
+  SHL R0, #5
+  LDA A0, #ATKTAB
+  ADD A0, R0
+  LDB R0, [A0+#AT_KIND]
+  CMP R0, #2
+  BEQ dp_r
+dp_lo:
+  OR R1, #DOWN
+dp_r:
+  RET
+
+; ---- flippad(A2, R1 = pad): world <-> relative to facing (swaps left/right when facing left) ----
+flippad:
+  LDW R0, [A2+#FFACE]
+  CMP R0, #0
+  BEQ fp_r
+  MOV R0, R1
+  AND R0, #LEFT+RIGHT
+  BEQ fp_r
+  CMP R0, #LEFT+RIGHT
+  BEQ fp_r
+  XOR R1, #LEFT+RIGHT
+fp_r:
+  RET
+
+; ---- trainstep: full meter, Start cycles the dummy (hold to quit), refills, input log ----
+trainstep:
+  LDA A2, #F1
+  MOV R0, #MTRMAX
+  STW R0, [A2+#FMTR]
+  LDW R0, [e0]
+  AND R0, #START
+  BEQ ts_hold
+  LDW R0, [dmode]
+  ADD R0, #1
+  CMP R0, #7
+  BLT ts_dm
+  MOV R0, #0
+ts_dm:
+  STW R0, [dmode]
+  MOV R1, #0               ; record starts afresh; play starts from the top
+  STW R1, [recP]
+  CMP R0, #5
+  BNE ts_nr
+  STW R1, [recN]
+ts_nr:
+  CALL trainsetdummy
+  MOV R0, #200
+  CALL sfxblip
+ts_hold:
+  LDW R0, [in0]
+  AND R0, #START
+  BEQ ts_h0
+  LDW R0, [stT]
+  ADD R0, #1
+  STW R0, [stT]
+  CMP R0, #60
+  BLT ts_hp
+  JMP inittitle
+ts_h0:
+  MOV R0, #0
+  STW R0, [stT]
+ts_hp:
+  LDA A2, #F2              ; damage of the combo in progress / the last one
+  LDW R0, [A2+#FHP]
+  MOV R1, #HP0
+  SUB R1, R0
+  CMP R1, #0
+  BEQ ts_nd
+  STW R1, [lastdmg]
+ts_nd:
+  LDW R0, [A2+#FST]        ; free (idle, crouch, jump, attack) for 40 frames: refill
+  CMP R0, #ST_BLOCK
+  BLT ts_free
+  MOV R0, #0
+  STW R0, [freeT]
+  BRA ts_in
+ts_free:
+  LDW R0, [freeT]
+  ADD R0, #1
+  STW R0, [freeT]
+  CMP R0, #40
+  BLT ts_in
+  MOV R0, #HP0
+  STW R0, [A2+#FHP]
+  LDA A2, #F1
+  STW R0, [A2+#FHP]
+ts_in:
+  LDA A2, #F1              ; input history: numpad direction (relative) | new buttons
+  CALL dirbits
+  LDW R1, [in0]
+  MOV R2, #5
+  MOV R0, R1
+  AND R0, #UP
+  BEQ ti_nu
+  ADD R2, #3
+ti_nu:
+  MOV R0, R1
+  AND R0, #DOWN
+  BEQ ti_nd
+  SUB R2, #3
+ti_nd:
+  MOV R0, R1
+  AND R0, R6
+  BEQ ti_nf
+  ADD R2, #1
+ti_nf:
+  MOV R0, R1
+  AND R0, R7
+  BEQ ti_nb
+  SUB R2, #1
+ti_nb:
+  LDW R0, [e0]
+  AND R0, #ABTN+BBTN+XBTN+YBTN
+  CMP R0, #0
+  BNE ti_push
+  LDW R1, [ilast]
+  CMP R2, R1
+  BEQ ti_done
+ti_push:
+  OR R0, R2
+  STW R2, [ilast]
+  LDW R1, [ihist+12]
+  STW R1, [ihist+14]
+  LDW R1, [ihist+10]
+  STW R1, [ihist+12]
+  LDW R1, [ihist+8]
+  STW R1, [ihist+10]
+  LDW R1, [ihist+6]
+  STW R1, [ihist+8]
+  LDW R1, [ihist+4]
+  STW R1, [ihist+6]
+  LDW R1, [ihist+2]
+  STW R1, [ihist+4]
+  LDW R1, [ihist]
+  STW R1, [ihist+2]
+  STW R0, [ihist]
+ti_done:
+  RET
+
+; ---- trainhud: dummy mode, combo damage, input history, hint ----
+trainhud:
+  MOV R0, #200
+  MOV R1, #30
+  LDA A1, #sDUMMY
+  CALL stext
+  LDW R1, [dmode]
+  MOV R0, R1
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #DMNAME
+  ADD A0, R1
+  LDADDR A1, [A0]
+  MOV R0, #256
+  MOV R1, #30
+  CALL stext
+  MOV R0, #200
+  MOV R1, #42
+  LDA A1, #sDMG
+  CALL stext
+  LDW R0, [lastdmg]
+  CALL utoa
+  MOV R0, #256
+  MOV R1, #42
+  LDA A1, #numstr
+  CALL stext
+  MOV R1, #212
+  LDA A1, #sTHINT
+  CALL ctext
+  MOV R4, #0
+th_lp:
+  MOV R0, R4
+  SHL R0, #1
+  LDA A0, #ihist
+  ADD A0, R0
+  LDW R2, [A0]
+  CMP R2, #0
+  BEQ th_next
+  LDA A1, #istr
+  MOV R0, R2
+  AND R0, #15
+  SHL R0, #1
+  LDA A0, #DIRTXT
+  ADD A0, R0
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A1
+  MOV R3, #ABTN
+  LDA A0, #BTNTXT
+th_b:
+  MOV R0, R2
+  AND R0, R3
+  BEQ th_bn
+  MOV R0, #32
+  STB R0, [A1]
+  INC A1
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A1
+th_bn:
+  INC A0
+  SHL R3, #1
+  CMP R3, #START
+  BLT th_b
+  MOV R0, #0
+  STB R0, [A1]
+  MOV R0, R4               ; y = 30 + i * 10
+  SHL R0, #1
+  MOV R1, R0
+  SHL R1, #2
+  ADD R1, R0
+  ADD R1, #30
+  MOV R0, #8
+  PUSH R4
+  LDA A1, #istr
+  CALL stext
+  POP R4
+th_next:
+  ADD R4, #1
+  CMP R4, #8
+  BGE th_ret
+  JMP th_lp
+th_ret:
+  RET
+DIRTXT:
+  DB 32, 32, 'D', 'B', 'D', 32, 'D', 'F', 'B', 32, 45, 32, 'F', 32, 'U', 'B', 'U', 32, 'U', 'F'
+BTNTXT:
+  DB 'A', 'B', 'X', 'Y'
+DMNAME:
+  DA sDSTAND, sDCROUCH, sDJUMP, sDGUARD, sDCPU, sDREC, sDPLAY
 
 ; ============================ title ============================
 inittitle:
   MOV R0, #G_TITLE
   STW R0, [gstate]
   MOV R0, #0
+  STW R0, [idleT]
   STW R0, [sel]
   STW R0, [gT]
   CALL setstage
@@ -691,11 +2031,37 @@ titleframe:
   ADD R0, #1
   STW R0, [gT]
   CALL anyedge
+  CMP R0, #0               ; 15 idle seconds start the attract demo
+  BEQ tf_idle
+  MOV R1, #0
+  STW R1, [idleT]
+  BRA tf_in
+tf_idle:
+  LDW R1, [idleT]
+  ADD R1, #1
+  STW R1, [idleT]
+  CMP R1, #900
+  BLT tf_in
+  JMP initdemo
+tf_in:
   MOV R1, R0
   AND R1, #UP+DOWN
   BEQ tf_st
   LDW R1, [sel]
-  XOR R1, #1
+  MOV R2, R0
+  AND R2, #DOWN
+  BEQ tf_up
+  ADD R1, #1
+  CMP R1, #3
+  BLT tf_set
+  MOV R1, #0
+  BRA tf_set
+tf_up:
+  SUB R1, #1
+  CMP R1, #0
+  BGE tf_set
+  MOV R1, #2
+tf_set:
   STW R1, [sel]
   PUSH R0
   MOV R0, #200
@@ -708,9 +2074,8 @@ tf_st:
   STW R0, [mode]
   MOV R0, #120
   CALL sfxblip
-  MOV R0, #0
-  STW R0, [cwho]
-  CALL initcreator
+  MOV R0, #1
+  CALL initselect
   RET
 tf_draw:
   LDW R0, [gT]
@@ -719,7 +2084,7 @@ tf_draw:
   MOV R4, #4               ; first frame: a dark plaque behind the menu
   MOV R5, #9
   MOV R6, #36
-  MOV R7, #17
+  MOV R7, #18
   CALL panel
 tf_np:
   CALL oambegin
@@ -758,6 +2123,10 @@ tf_lp:
   MOV R1, #108
   LDA A1, #sVERSUS
   CALL stext
+  MOV R0, #124
+  MOV R1, #120
+  LDA A1, #sTRAIN
+  CALL stext
   LDW R1, [sel]
   SHL R1, #2
   MOV R0, R1
@@ -771,7 +2140,7 @@ tf_lp:
   LDW R0, [gT]
   AND R0, #32
   BNE tf_nst
-  MOV R1, #124
+  MOV R1, #134
   LDA A1, #sSTART
   CALL ctext
 tf_nst:
@@ -929,27 +2298,26 @@ creatorframe:
   LDW R0, [cwho]
   CMP R0, #0
   BEQ cf_pad
+  LDW R0, [mode]           ; training: pad 1 tailors the dummy too
+  CMP R0, #2
+  BEQ cf_pad
   LDW R1, [e1]
 cf_pad:
   STW R1, [cedge]
   MOV R0, R1
   AND R0, #START
   BEQ cf_up
-  CALL savepicks
+  CALL savepicks           ; tailored: back to the select screen, confirmed
   MOV R0, #120
   CALL sfxblip
-  LDW R0, [mode]
-  CMP R0, #0
-  BEQ cf_go
   LDW R0, [cwho]
-  CMP R0, #0
-  BNE cf_go
-  MOV R0, #1               ; versus: now player 2 builds a fighter
-  STW R0, [cwho]
-  CALL initcreator
-  RET
-cf_go:
-  CALL newmatch
+  SHL R0, #1
+  LDA A0, #selok1
+  ADD A0, R0
+  MOV R0, #1
+  STW R0, [A0]
+  MOV R0, #0
+  CALL initselect
   RET
 cf_up:
   LDW R1, [cedge]
@@ -1094,8 +2462,18 @@ cs_done:
 newmatch:
   MOV R0, #0
   STW R0, [rival]
+  STW R0, [bonusnx]
   ; fall through
 startmatch:
+  LDW R0, [bonusnx]        ; arcade: the bonus stage comes between rivals 2 and 3
+  CMP R0, #0
+  BEQ sm_norm
+  MOV R0, #0
+  STW R0, [bonusnx]
+  JMP initbonus
+sm_norm:
+  MOV R0, #0
+  STW R0, [bonus]
   CALL applyp1
   LDA A2, #F1
   MOV R0, #0
@@ -1113,15 +2491,16 @@ sm_vs:
   LDA A2, #F2
   MOV R0, #0
   STW R0, [A2+#FCPU]
-  MOV R0, #2               ; versus is fought at sunset
-  CALL setstage
+  LDW R0, [A2+#FBODY]      ; versus is fought on P2's home stage
+  CALL homestage
+  LDW R0, [mode]
+  CMP R0, #2
+  BNE sm_go
+  JMP inittrain
 sm_go:
   MOV R0, #1
   STW R0, [round]
-  CALL copymaps
-  CALL clearhud
-  CALL initoath
-  RET
+  JMP initvs
 
 ; ---- initoath: fresh round, then the secret oath screen ----
 initoath:
@@ -1330,6 +2709,17 @@ introframe:
   RET
 inf_draw:
   CALL oambegin
+  LDW R0, [bonus]
+  CMP R0, #0
+  BEQ inf_nb
+  MOV R1, #64
+  LDA A1, #sBONUS1
+  CALL cbig
+  MOV R1, #88
+  LDA A1, #sBONUS2
+  CALL cbig
+  BRA inf_f
+inf_nb:
   LDW R0, [gT]
   CMP R0, #64
   BGE inf_fight
@@ -1374,6 +2764,7 @@ fightframe:
   BEQ ff_run
   SUB R0, #1
   STW R0, [freeze]
+  CALL freezepads
   BRA ff_draw
 ff_run:
   LDW R0, [tick]
@@ -1385,9 +2776,25 @@ ff_run:
   CALL separate
   LDA A0, #attackcheck
   CALL both
+  LDA A0, #projcheck
+  CALL both
   LDA A0, #faceup
   CALL both
   CALL updatecam
+  LDW R0, [bonus]
+  CMP R0, #0
+  BEQ ff_nb
+  JMP bonusstep
+ff_nb:
+  LDW R0, [mode]           ; training: no KO, no clock
+  CMP R0, #2
+  BNE ff_nt
+  CALL trainstep
+  LDW R0, [gstate]
+  CMP R0, #G_FIGHT
+  BEQ ff_draw
+  RET
+ff_nt:
   LDA A2, #F1              ; a KO ends the round
   LDW R0, [A2+#FST]
   CMP R0, #ST_KO
@@ -1411,13 +2818,33 @@ ff_ko:
 ff_draw:
   CALL oambegin
   CALL drawbreak
+  CALL drawcombo
   CALL drawspark
+  CALL drawbolts
   CALL drawfighters
   CALL drawhud
+  LDW R0, [mode]
+  CMP R0, #2
+  BNE ff_dm
+  CALL trainhud
+  BRA ff_dr
+ff_dm:
+  CMP R0, #3
+  BNE ff_dr
+  LDW R0, [tick]           ; demo: blink the invitation
+  AND R0, #32
+  BNE ff_dr
+  MOV R1, #212
+  LDA A1, #sDEMO
+  CALL ctext
+ff_dr:
   RET
 
 ; ---- clocktick: one second = 60 fight frames; kept oaths trickle meter ----
 clocktick:
+  LDW R0, [mode]           ; training has no clock
+  CMP R0, #2
+  BEQ ct_done
   LDW R0, [tsub]
   ADD R0, #1
   STW R0, [tsub]
@@ -1466,6 +2893,37 @@ fighterstep:
   CALL motionrec
   CALL control
   CALL physics
+  CALL stundecay
+  CALL projstep
+  RET
+
+; ---- freezepads: keep players' presses and motions made during a hit freeze ----
+freezepads:
+  LDA A2, #F1
+  LDA A3, #F2
+  LDW R1, [in0]
+  LDA A0, #latch
+  CALL fzone
+  LDA A2, #F2
+  LDA A3, #F1
+  LDW R1, [in1]
+  LDA A0, #latch+2
+  CALL fzone
+  RET
+fzone:
+  LDW R0, [A2+#FCPU]
+  CMP R0, #0
+  BNE fz_ret
+  LDW R0, [A2+#FPADP]
+  NOT R0
+  AND R0, R1
+  LDW R2, [A0]
+  OR R2, R0
+  STW R2, [A0]
+  STW R1, [A2+#FPADP]
+  STW R1, [A2+#FPAD]
+  CALL motionrec
+fz_ret:
   RET
 
 ; ---- padsync: this frame's pad for A2 (controller or CPU) and its edges ----
@@ -1480,13 +2938,40 @@ ps_human:
   LDW R1, [in0]
   LDW R0, [A2+#FID]
   CMP R0, #0
-  BEQ ps_set
+  BNE ps_p2h
+  LDW R0, [mode]           ; training record: pad 1 belongs to the dummy
+  CMP R0, #2
+  BNE ps_set
+  LDW R0, [dmode]
+  CMP R0, #5
+  BNE ps_set
+  MOV R1, #0
+  BRA ps_set
+ps_p2h:
+  MOV R1, #0               ; the bonus cart never moves
+  LDW R0, [bonus]
+  CMP R0, #0
+  BNE ps_set
+  LDW R0, [mode]
+  CMP R0, #2
+  BNE ps_p2
+  CALL dummypad
+  BRA ps_set
+ps_p2:
   LDW R1, [in1]
 ps_set:
   STW R1, [A2+#FPAD]
   LDW R0, [A2+#FPADP]
   NOT R0
   AND R0, R1
+  LDW R2, [A2+#FID]        ; plus anything pressed during a hit freeze
+  SHL R2, #1
+  LDA A0, #latch
+  ADD A0, R2
+  LDW R3, [A0]
+  OR R0, R3
+  MOV R3, #0
+  STW R3, [A0]
   STW R0, [A2+#FEDGE]
   STW R1, [A2+#FPADP]
   RET
@@ -1506,7 +2991,7 @@ db_left:
   MOV R5, #-1
   RET
 
-; ---- motionrec: log relative direction changes (1 D, 2 DF, 3 F, 4 B, 0 other) ----
+; ---- motionrec: log relative direction changes (1 D, 2 DF, 3 F, 4 B, 5 DB, 0 other) ----
 motionrec:
   CALL dirbits
   LDW R1, [A2+#FPAD]
@@ -1514,11 +2999,15 @@ motionrec:
   MOV R2, R1
   AND R2, #DOWN
   BEQ mr_nd
-  MOV R0, #1
+  MOV R0, #2
   MOV R2, R1
   AND R2, R6
-  BEQ mr_code
-  MOV R0, #2
+  BNE mr_code
+  MOV R0, #5
+  MOV R2, R1
+  AND R2, R7
+  BNE mr_code
+  MOV R0, #1
   BRA mr_code
 mr_nd:
   MOV R2, R1
@@ -1600,48 +3089,211 @@ getreq:
 gr_human:
   LDW R1, [A2+#FEDGE]
   MOV R0, R1
-  AND R0, #ABTN
-  BEQ gr_b
+  AND R0, #ABTN+XBTN
+  BEQ gr_k
+  JMP punchreq
+gr_k:
+  MOV R0, R1
+  AND R0, #BBTN+YBTN
+  BEQ gr_none
+  JMP kickreq
+gr_none:
+  MOV R0, #0
+  RET
+
+; ---- punchreq(R1 = edges) -> R0 = attack + 1: specials, throw, then the normals ----
+punchreq:
+  MOV R0, R1
+  AND R0, #XBTN
+  PUSH R0                  ; heavy?
   LDA A1, #MO_DP
   CALL motion
   CMP R0, #0
-  BEQ gr_qa
-  MOV R0, #AK_RISE+1
-  RET
-gr_qa:
+  BEQ pr_q
+  POP R4
+  PUSH R4
+  MOV R2, #2               ; DP+P
+  CALL slotreq
+  CMP R0, #0
+  BNE pr_got
+pr_q:
   LDA A1, #MO_QCF
   CALL motion
   CMP R0, #0
-  BEQ gr_pa
-  MOV R0, #AK_RUSH+1
+  BEQ pr_b
+  POP R4
+  PUSH R4
+  MOV R2, #0               ; QCF+P
+  CALL slotreq
+  CMP R0, #0
+  BNE pr_got
+pr_b:
+  LDA A1, #MO_QCB
+  CALL motion
+  CMP R0, #0
+  BEQ pr_n
+  POP R4
+  PUSH R4
+  MOV R2, #4               ; QCB+P
+  CALL slotreq
+  CMP R0, #0
+  BEQ pr_n
+pr_got:
+  POP R4
   RET
-gr_pa:
-  MOV R0, #AK_PUNCH+1
+pr_n:
+  POP R4
   LDW R1, [A2+#FPAD]
   AND R1, #DOWN
-  BEQ gr_ret
+  BEQ pr_st
   MOV R0, #AK_CPUNCH+1
-gr_ret:
+  CMP R4, #0
+  BEQ pr_r
+  MOV R0, #AK_CHPUNCH+1
   RET
-gr_b:
+pr_st:
+  CMP R4, #0
+  BEQ pr_lp
+  CALL dirbits             ; forward or back + X up close: a throw
+  LDW R1, [A2+#FPAD]
+  MOV R0, R6
+  OR R0, R7
+  AND R0, R1
+  BEQ pr_hp
+  AND R1, R7
+  PUSH R1
+  MOV R3, #THROWR
+  CALL throwable
+  POP R1
+  CMP R0, #0
+  BEQ pr_hp
+  MOV R0, #AK_THROW+1
+  CMP R1, #0
+  BEQ pr_r
+  MOV R0, #AK_BTHROW+1
+  RET
+pr_hp:
+  MOV R0, #AK_HPUNCH+1
+  RET
+pr_lp:
+  MOV R0, #AK_PUNCH+1
+  RET
+pr_r:
+  RET
+
+; ---- kickreq(R1 = edges) -> R0 = attack + 1 ----
+kickreq:
   MOV R0, R1
-  AND R0, #BBTN
-  BEQ gr_ret
+  AND R0, #YBTN
+  PUSH R0                  ; heavy?
   LDW R0, [A2+#FMTR]
   CMP R0, #MTRMAX
-  BLT gr_kb
+  BLT kr_s
   LDA A1, #MO_QCF
   CALL motion
   CMP R0, #0
-  BEQ gr_kb
+  BEQ kr_s
+  POP R0
   MOV R0, #AK_SURGE+1
   RET
-gr_kb:
-  MOV R0, #AK_KICK+1
+kr_s:
+  LDA A1, #MO_DP
+  CALL motion
+  CMP R0, #0
+  BEQ kr_q
+  POP R4
+  PUSH R4
+  MOV R2, #8               ; DP+K
+  CALL slotreq
+  CMP R0, #0
+  BNE kr_got
+kr_q:
+  LDA A1, #MO_QCB
+  CALL motion
+  CMP R0, #0
+  BEQ kr_n
+  POP R4
+  PUSH R4
+  MOV R2, #6               ; QCB+K
+  CALL slotreq
+  CMP R0, #0
+  BEQ kr_n
+kr_got:
+  POP R4
+  RET
+kr_n:
+  POP R4
   LDW R1, [A2+#FPAD]
   AND R1, #DOWN
-  BEQ gr_ret
+  BEQ kr_st
+  MOV R0, #AK_CLK+1
+  CMP R4, #0
+  BEQ kr_r
   MOV R0, #AK_SWEEP+1
+kr_r:
+  RET
+kr_st:
+  MOV R0, #AK_KICK+1
+  CMP R4, #0
+  BEQ kr_r
+  MOV R0, #AK_HKICK+1
+  RET
+
+; ---- slotreq(A2, R2 = slot * 2, R4 = heavy) -> R0 = this fighter's special + 1, or 0 ----
+slotreq:
+  LDW R0, [A2+#FBODY]
+  MOV R1, R0
+  SHL R0, #3
+  ADD R0, R1
+  ADD R0, R1               ; body * 10
+  ADD R0, R2
+  CMP R4, #0
+  BEQ sq_l
+  ADD R0, #1
+sq_l:
+  LDA A0, #CHSPEC
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R0, #$FF
+  BEQ sq_no
+  MOV R1, R0               ; one bolt on screen at a time
+  SHL R1, #5
+  LDA A0, #ATKTAB
+  ADD A0, R1
+  LDB R1, [A0+#AT_FL2]
+  AND R1, #F2_PROJ
+  BEQ sq_ok
+  LDW R1, [A2+#FPJT]
+  CMP R1, #0
+  BNE sq_no
+sq_ok:
+  ADD R0, #1
+  RET
+sq_no:
+  MOV R0, #0
+  RET
+
+; ---- throwable(A2, A3, R3 = range) -> R0 = 1 if A3 can be thrown from here ----
+throwable:
+  LDW R0, [A2+#FY]
+  CMP R0, #0
+  BNE tw_no
+  LDW R0, [A3+#FY]
+  CMP R0, #0
+  BNE tw_no
+  LDW R0, [A3+#FST]
+  CMP R0, #ST_ATK          ; idle, crouching or attacking
+  BLE tw_rng
+  CMP R0, #ST_DIZZY
+  BNE tw_no
+tw_rng:
+  CALL cpudist
+  CMP R0, R3
+  BGT tw_no
+  MOV R0, #1
+  RET
+tw_no:
+  MOV R0, #0
   RET
 
 ; ---- control: state machine for A2 (A3 = rival) ----
@@ -1661,37 +3313,27 @@ ctl_n1:
   BNE ctl_n2
   JMP downstep
 ctl_n2:
+  CMP R0, #ST_DIZZY
+  BNE ctl_n3
+  JMP dizzystep
+ctl_n3:
   RET                      ; KO / WIN: nothing
 ctl_stun:
   LDW R0, [A2+#FT]
   SUB R0, #1
   STW R0, [A2+#FT]
   BGT ctl_ret
-  MOV R0, #ST_IDLE
-  STW R0, [A2+#FST]
-  MOV R0, #PO_GUARD
-  STW R0, [A2+#FPOSE]
+  JMP standup
 ctl_ret:
   RET
 ctl_air:
-  CALL getreq
+  CALL getreq              ; any request in the air becomes the matching air attack
   CMP R0, #0
   BEQ ctl_ret
-  MOV R1, #AK_APUNCH+1     ; any button in the air: A -> air punch, B -> air kick
-  CMP R0, #AK_KICK+1
-  BEQ ctl_ak
-  CMP R0, #AK_SWEEP+1
-  BEQ ctl_ak
-  CMP R0, #AK_SURGE+1
-  BEQ ctl_ak
-  CMP R0, #AK_AKICK+1
-  BEQ ctl_ak
-  BRA ctl_as
-ctl_ak:
-  MOV R1, #AK_AKICK+1
-ctl_as:
-  MOV R0, R1
   SUB R0, #1
+  LDA A0, #AIRMAP
+  ADD A0, R0
+  LDB R0, [A0]
   JMP startatk
 ctl_ground:
   CALL getreq
@@ -1720,9 +3362,9 @@ ctl_nojump:
   MOV R2, R1
   AND R2, R7
   BEQ ctl_cp
-  LDW R2, [A3+#FST]        ; holding down-back against an attack: show the low guard
-  CMP R2, #ST_ATK
-  BNE ctl_cp
+  CALL threat              ; holding down-back against an attack: show the low guard
+  CMP R2, #0
+  BEQ ctl_cp
   MOV R0, #PO_CBLOCK
 ctl_cp:
   STW R0, [A2+#FPOSE]
@@ -1735,9 +3377,9 @@ ctl_stand:
   MOV R0, R1
   AND R0, R7
   BEQ ctl_fwd
-  LDW R2, [A3+#FST]        ; back held while the rival attacks: guard, don't walk
-  CMP R2, #ST_ATK
-  BNE ctl_back
+  CALL threat              ; back held while the rival attacks: guard, don't walk
+  CMP R2, #0
+  BEQ ctl_back
   MOV R0, #0
   STW R0, [A2+#FBACK]
   MOV R0, #PO_BLOCK
@@ -1766,6 +3408,30 @@ ctl_fwd:
 ctl_idle:
   MOV R0, #PO_GUARD
   STW R0, [A2+#FPOSE]
+  RET
+
+; ---- threat(A2, A3) -> R2 = 1 if the rival is attacking or its bolt is close (keeps R1, R5-R7) ----
+threat:
+  LDW R2, [A3+#FST]
+  CMP R2, #ST_ATK
+  BEQ th_yes
+  LDW R2, [A3+#FPJT]
+  CMP R2, #0
+  BEQ th_no
+  LDW R2, [A3+#FPJX]
+  LDW R3, [A2+#FX]
+  SUB R2, R3
+  CMP R2, #0
+  BGE th_a
+  NEG R2
+th_a:
+  CMP R2, #80
+  BGT th_no
+th_yes:
+  MOV R2, #1
+  RET
+th_no:
+  MOV R2, #0
   RET
 
 ; ---- walk(A2, R5 = world direction +1/-1): move by FSPD (8.8), animate ----
@@ -1828,7 +3494,7 @@ dj_set:
 ; ---- atkrec(A2) -> A0 = this fighter's ATKTAB row ----
 atkrec:
   LDW R0, [A2+#FATK]
-  SHL R0, #4
+  SHL R0, #5
   LDA A0, #ATKTAB
   ADD A0, R0
   RET
@@ -1842,6 +3508,7 @@ startatk:
   STW R0, [A2+#FT]
   STW R0, [A2+#FHIT]
   STW R0, [A2+#FBACK]
+  STW R0, [A2+#FAICX]
   CALL atkrec
   LDB R0, [A0+#AT_P0]
   STW R0, [A2+#FPOSE]
@@ -1863,10 +3530,19 @@ sa_nk:
   STW R0, [surgeT]
   LDW R0, [A2+#FID]
   STW R0, [brkWho]
-  MOV R0, #60
-  CALL sfxblip
+  MOV R0, #SX_SUPER
+  CALL sfxplay
   RET
 sa_snd:
+  LDW R0, [A2+#FATK]       ; specials shout, normals swish
+  LDA A0, #ATKSFX
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R0, #0
+  BEQ sa_bl
+  CALL sfxplay
+  RET
+sa_bl:
   MOV R0, #180
   CALL sfxblip
   RET
@@ -1874,6 +3550,47 @@ sa_snd:
 ; ---- atkstep: advance the attack timeline (startup, active, recovery) ----
 atkstep:
   CALL atkrec
+  LDW R0, [A2+#FHIT]       ; connected (hit or block): chain or cancel?
+  CMP R0, #0
+  BEQ as_go
+  LDB R5, [A0+#AT_FL2]
+  MOV R0, R5
+  AND R0, #F2_CHAIN+F2_CXL
+  BEQ as_go
+  LDB R1, [A0+#AT_S]       ; only until a few frames into recovery
+  LDB R2, [A0+#AT_A]
+  ADD R1, R2
+  ADD R1, #CXLWIN
+  LDW R0, [A2+#FT]
+  CMP R0, R1
+  BGE as_go
+  PUSH R5
+  CALL getreq
+  POP R5
+  CMP R0, #0
+  BEQ as_go0
+  SUB R0, #1
+  MOV R4, R0
+  SHL R4, #5
+  LDA A0, #ATKTAB
+  ADD A0, R4
+  LDB R1, [A0+#AT_FL2]
+  MOV R2, R5
+  AND R2, #F2_CXL
+  BEQ as_ch
+  MOV R2, R1
+  AND R2, #F2_SPEC
+  BNE as_cx
+as_ch:
+  AND R5, #F2_CHAIN
+  BEQ as_go0
+  AND R1, #F2_CHAIN
+  BEQ as_go0
+as_cx:
+  JMP startatk
+as_go0:
+  CALL atkrec
+as_go:
   LDW R4, [A2+#FT]
   ADD R4, #1
   STW R4, [A2+#FT]
@@ -1890,7 +3607,9 @@ as_act:
   BLT as_live
   LDB R0, [A0+#AT_FL]      ; air attacks stay live until they land
   AND R0, #AF_AIR
-  BEQ as_rec
+  BNE as_air
+  JMP as_rec
+as_air:
   LDW R0, [A2+#FY]
   CMP R0, #0
   BGE as_rec
@@ -1900,8 +3619,13 @@ as_act:
 as_live:
   LDB R0, [A0+#AT_P1]
   STW R0, [A2+#FPOSE]
-  CMP R4, R1               ; first active frame: Palm Rise lifts off
+  CMP R4, R1               ; first active frame: fire a bolt, or Palm Rise lifts off
   BNE as_dash
+  LDB R0, [A0+#AT_FL2]
+  AND R0, #F2_PROJ
+  BEQ as_rz
+  JMP firebolt
+as_rz:
   LDB R0, [A0+#AT_FL]
   AND R0, #AF_RISE
   BEQ as_dash
@@ -1918,11 +3642,11 @@ as_dash:
   MOV R0, #0
   STW R0, [A2+#FHIT]
 as_alt:
-  MOV R0, R4               ; alternate punch / kick frames
+  MOV R0, R4               ; alternate the active pose with AT_ALT
   AND R0, #4
-  MOV R0, #PO_PUNCH
+  LDB R0, [A0+#AT_P1]
   BEQ as_altp
-  MOV R0, #PO_KICK
+  LDB R0, [A0+#AT_ALT]
 as_altp:
   STW R0, [A2+#FPOSE]
 as_dmv:
@@ -1973,11 +3697,69 @@ downstep:
   STW R0, [A2+#FT]
   CMP R0, #DOWNT
   BLT ds_ret
+  JMP standup
+ds_ret:
+  RET
+
+; ---- standup: stun over -> idle, or dizzy if the stun points ran over ----
+standup:
+  LDW R0, [A2+#FDIZ]
+  CMP R0, #DIZMAX
+  BGE su_dz
   MOV R0, #ST_IDLE
   STW R0, [A2+#FST]
   MOV R0, #PO_GUARD
   STW R0, [A2+#FPOSE]
-ds_ret:
+  RET
+su_dz:
+  MOV R0, #0
+  STW R0, [A2+#FDIZ]
+  STW R0, [A2+#FCRCH]
+  MOV R0, #ST_DIZZY
+  STW R0, [A2+#FST]
+  MOV R0, #DIZT
+  STW R0, [A2+#FT]
+  MOV R0, #PO_DIZZY
+  STW R0, [A2+#FPOSE]
+  MOV R0, #500
+  CALL sfxblip
+  RET
+
+; ---- dizzystep: wobble until it wears off; every new press shakes it off faster ----
+dizzystep:
+  LDW R0, [A2+#FEDGE]
+  LDW R1, [A2+#FT]
+  SUB R1, #1
+  CMP R0, #0
+  BEQ dz_t
+  SUB R1, #3
+dz_t:
+  STW R1, [A2+#FT]
+  CMP R1, #0
+  BGT dz_ret
+  MOV R0, #ST_IDLE
+  STW R0, [A2+#FST]
+  MOV R0, #PO_GUARD
+  STW R0, [A2+#FPOSE]
+dz_ret:
+  RET
+
+; ---- stundecay: stun points drain while the fighter is free ----
+stundecay:
+  LDW R0, [A2+#FST]
+  CMP R0, #ST_ATK
+  BGT sd_ret
+  LDW R0, [tick]
+  AND R0, #3
+  BNE sd_ret
+  LDW R0, [A2+#FDIZ]
+  CMP R0, #0
+  BEQ sd_ret
+  CMP R0, #DIZMAX
+  BGE sd_ret
+  SUB R0, #1
+  STW R0, [A2+#FDIZ]
+sd_ret:
   RET
 
 ; ---- physics: gravity + landing, pushback, flash, clamp ----
@@ -2222,6 +4004,15 @@ ac_go:
   RET
 ac_go2:
   CALL atkrec
+  LDB R0, [A0+#AT_FL2]     ; bolts hit on their own; throws have their own check
+  AND R0, #F2_PROJ+F2_THROW
+  BEQ ac_go2b
+  AND R0, #F2_THROW
+  BEQ ac_r
+  JMP throwcheck
+ac_r:
+  RET
+ac_go2b:
   LDW R4, [A2+#FT]
   LDB R1, [A0+#AT_S]
   CMP R4, R1
@@ -2411,9 +4202,12 @@ bk_p:
   STW R0, [sparkK]
   MOV R0, #3
   STW R0, [freeze]
-  MOV R0, #300
-  CALL sfxblip
-  PUSHA A2                 ; No Guard: the defender just blocked
+  PUSHA A0
+  MOV R0, #SX_BLOCK
+  CALL sfxplay
+  POPA A0
+  PUSHA A0                 ; No Guard: the defender just blocked
+  PUSHA A2
   PUSHA A3
   MOVA A0, A2
   MOVA A2, A3              ; A2 = defender
@@ -2422,12 +4216,38 @@ bk_p:
   CALL breakself
   POPA A3
   POPA A2
+  POPA A0
   CALL skycheck
+  LDB R0, [A0+#AT_FL2]     ; specials chip a quarter of their damage through a guard
+  AND R0, #F2_SPEC
+  BEQ bk_ret
+  LDB R0, [A0+#AT_DMG]
+  SHR R0, #2
+  CMP R0, #1
+  BGE bk_c
+  MOV R0, #1
+bk_c:
+  LDW R1, [A3+#FHP]
+  SUB R1, R0
+  CMP R1, #0
+  BGT bk_hp
+  LDW R2, [mode]           ; training never KOs
+  CMP R2, #2
+  BNE bk_ko
+  MOV R1, #1
+  BRA bk_hp
+bk_ko:
+  MOV R1, #0
+  STW R1, [A3+#FHP]
+  MOV R0, #ST_KO           ; chipped out
+  JMP hl_fall
+bk_hp:
+  STW R1, [A3+#FHP]
+bk_ret:
   RET
 
-; ---- skycheck(A2): a ground attack connected -> Sky Striker breaks ----
+; ---- skycheck(A2, A0 = the row that connected): a ground attack -> Sky Striker breaks ----
 skycheck:
-  CALL atkrec
   LDB R0, [A0+#AT_FL]
   AND R0, #AF_GROUND
   BEQ sk_ret
@@ -2463,20 +4283,62 @@ pa_set:
 
 ; ---- hitland: damage, stun or knockdown, meter, sparks ----
 hitland:
+  LDW R0, [A3+#FST]        ; still reeling from the last hit: the combo goes on
+  CMP R0, #ST_HURT
+  BEQ hl_cmb
+  CMP R0, #ST_DIZZY
+  BEQ hl_cmb
+  MOV R0, #0
+  STW R0, [A2+#FCMB]
+hl_cmb:
+  LDW R0, [A2+#FCMB]
+  ADD R0, #1
+  STW R0, [A2+#FCMB]
+  CMP R0, #2
+  BLT hl_dmg
+  LDW R1, [A2+#FID]        ; "n HITS" on the attacker's side
+  SHL R1, #1
+  LDA A1, #cmbN
+  ADD A1, R1
+  STW R0, [A1]
+  LDA A1, #cmbT
+  ADD A1, R1
+  MOV R1, #80
+  STW R1, [A1]
+hl_dmg:
+  MOV R5, R0               ; R5 = hit number in the combo
   LDB R0, [A0+#AT_DMG]
   LDW R1, [A2+#FDMGB]
   ADD R0, R1
   LDW R1, [A3+#FARMR]
   SUB R0, R1
+  CMP R5, #3               ; from the third hit a combo does 3/4 damage
+  BLT hl_sc
+  MOV R1, R0
+  SAR R1, #2
+  SUB R0, R1
+hl_sc:
   CMP R0, #1
   BGE hl_d
   MOV R0, #1
 hl_d:
+  LDW R1, [A3+#FST]        ; stun builds with damage (a dizzy fighter starts over)
+  MOV R2, #0
+  CMP R1, #ST_DIZZY
+  BEQ hl_z
+  LDW R2, [A3+#FDIZ]
+  ADD R2, R0
+hl_z:
+  STW R2, [A3+#FDIZ]
   LDW R1, [A3+#FHP]
   SUB R1, R0
-  CMP R1, #0
+  CMP R1, #1
   BGE hl_hp
   MOV R1, #0
+  LDW R2, [mode]           ; training never KOs
+  CMP R2, #2
+  BNE hl_hp
+  MOV R1, #1
 hl_hp:
   STW R1, [A3+#FHP]
   MOV R0, #0
@@ -2513,7 +4375,9 @@ hl_hp:
   CALL pushapart
   MOV R0, #4
   STW R0, [freeze]
-  MOV R0, #24
+  LDB R0, [A0+#AT_DMG]     ; heavier hits thump lower
+  SHL R0, #1
+  ADD R0, #10
   CALL noisehit
   CALL skycheck
   RET
@@ -2543,6 +4407,215 @@ hl_kv:
   MOV R0, #16
   CALL noisehit
   CALL skycheck
+  RET
+
+; ---- throwcheck(A2 = thrower, A0 = throw row): one try on the first active frame ----
+throwcheck:
+  LDW R4, [A2+#FT]
+  LDB R1, [A0+#AT_S]
+  CMP R4, R1
+  BEQ tc_go
+  RET
+tc_go:
+  MOV R0, #1
+  STW R0, [A2+#FHIT]
+  LDB R3, [A0+#AT_X1]
+  CALL throwable
+  CMP R0, #0
+  BNE tc_in
+  RET                      ; whiffed: a long recovery
+tc_in:
+  LDW R0, [A3+#FST]        ; both grabbing at once: a tech, nobody falls
+  CMP R0, #ST_ATK
+  BNE tc_hit
+  PUSHA A0
+  PUSHA A2
+  MOVA A2, A3
+  CALL atkrec
+  POPA A2
+  LDB R0, [A0+#AT_FL2]
+  POPA A0
+  AND R0, #F2_THROW
+  BEQ tc_hit
+  MOV R0, #1
+  STW R0, [A3+#FHIT]
+  MOV R0, #ST_BLOCK
+  STW R0, [A2+#FST]
+  STW R0, [A3+#FST]
+  MOV R0, #14
+  STW R0, [A2+#FT]
+  STW R0, [A3+#FT]
+  MOV R0, #PO_BLOCK
+  STW R0, [A2+#FPOSE]
+  STW R0, [A3+#FPOSE]
+  MOV R0, #8
+  CALL pushapart
+  MOV R0, #40
+  STW R0, [techT]
+  MOV R0, #300
+  CALL sfxblip
+  RET
+tc_hit:
+  LDB R0, [A0+#AT_FL2]     ; a back throw: the rival is thrown over to the far side
+  AND R0, #F2_BACK
+  BEQ tc_fwd
+  CALL dirbits
+  LDW R0, [A2+#FX]
+  CMP R5, #0
+  BGT tc_bl
+  ADD R0, #20
+  BRA tc_bs
+tc_bl:
+  SUB R0, #20
+tc_bs:
+  STW R0, [A3+#FX]
+tc_fwd:
+  LDW R0, [A3+#FX]
+  STW R0, [sparkX]
+  MOV R0, #GROUNDY-36
+  STW R0, [sparkY]
+  MOV R0, #10
+  STW R0, [sparkT]
+  JMP hitland
+
+; ---- firebolt(A2, A0 = row): launch a Seal Bolt (AT_DASH = speed) ----
+firebolt:
+  LDW R0, [A2+#FPJT]
+  CMP R0, #0
+  BNE fb_ret
+  MOV R0, #1
+  STW R0, [A2+#FPJT]
+  LDW R0, [A2+#FATK]
+  STW R0, [A2+#FPJA]
+  LDB R2, [A0+#AT_DASH]
+  CALL dirbits
+  LDW R0, [A2+#FX]
+  CMP R5, #0
+  BGT fb_r
+  NEG R2
+  SUB R0, #24
+  BRA fb_s
+fb_r:
+  ADD R0, #24
+fb_s:
+  STW R0, [A2+#FPJX]
+  STW R2, [A2+#FPJV]
+  MOV R0, #120
+  CALL sfxblip
+fb_ret:
+  RET
+
+; ---- projstep(A2): the bolt flies until it leaves the screen ----
+projstep:
+  LDW R0, [A2+#FPJT]
+  CMP R0, #0
+  BEQ pj_ret
+  ADD R0, #1
+  STW R0, [A2+#FPJT]
+  LDW R0, [A2+#FPJX]
+  LDW R1, [A2+#FPJV]
+  ADD R0, R1
+  STW R0, [A2+#FPJX]
+  LDW R1, [cam]
+  SUB R0, R1
+  CMP R0, #-16
+  BLT pj_gone
+  CMP R0, #336
+  BLE pj_ret
+pj_gone:
+  MOV R0, #0
+  STW R0, [A2+#FPJT]
+pj_ret:
+  RET
+
+; ---- projcheck(A2 = owner, A3 = target): bolts clash, or hit / are blocked ----
+projcheck:
+  LDW R0, [A2+#FPJT]
+  CMP R0, #0
+  BNE pc_live
+  RET
+pc_live:
+  LDW R0, [A3+#FPJT]       ; two bolts meet: both burst
+  CMP R0, #0
+  BEQ pc_body
+  LDW R0, [A2+#FPJX]
+  LDW R1, [A3+#FPJX]
+  SUB R0, R1
+  CMP R0, #0
+  BGE pc_a
+  NEG R0
+pc_a:
+  CMP R0, #16
+  BGT pc_body
+  MOV R0, #0
+  STW R0, [A2+#FPJT]
+  STW R0, [A3+#FPJT]
+  STW R1, [sparkX]
+  MOV R0, #GROUNDY-BOLTY
+  STW R0, [sparkY]
+  MOV R0, #10
+  STW R0, [sparkT]
+  MOV R0, #1
+  STW R0, [sparkK]
+  MOV R0, #20
+  CALL noisehit
+  RET
+pc_body:
+  LDW R0, [A3+#FST]        ; down or KO: it passes over
+  CMP R0, #ST_DOWN
+  BEQ pc_r0
+  CMP R0, #ST_KO
+  BNE pc_inv
+pc_r0:
+  RET
+pc_inv:
+  CMP R0, #ST_ATK          ; Palm Rise's invulnerable startup
+  BNE pc_v
+  PUSHA A2
+  MOVA A2, A3
+  CALL atkrec
+  POPA A2
+  LDB R1, [A0+#AT_FL]
+  AND R1, #AF_INV
+  BEQ pc_v
+  LDB R2, [A0+#AT_S]
+  LDW R3, [A3+#FT]
+  CMP R3, R2
+  BLT pc_ret
+pc_v:
+  LDW R0, [A2+#FPJX]       ; horizontal: bolt +-8 against the body +-12
+  LDW R1, [A3+#FX]
+  SUB R0, R1
+  CMP R0, #0
+  BGE pc_b
+  NEG R0
+pc_b:
+  CMP R0, #20
+  BGT pc_ret
+  LDW R0, [A3+#FY]         ; feet above the bolt's top: jumped it
+  SAR R0, #8
+  NEG R0
+  CMP R0, #BOLTY+8
+  BGT pc_ret
+  MOV R0, #0
+  STW R0, [A2+#FPJT]
+  LDW R0, [A2+#FPJX]
+  STW R0, [sparkX]
+  MOV R0, #GROUNDY-BOLTY
+  STW R0, [sparkY]
+  MOV R0, #10
+  STW R0, [sparkT]
+  LDW R0, [A2+#FPJA]
+  SHL R0, #5
+  LDA A0, #ATKTAB
+  ADD A0, R0
+  CALL tryblock
+  CMP R0, #0
+  BEQ pc_hit
+  JMP blocked
+pc_hit:
+  JMP hitland
+pc_ret:
   RET
 
 ; ---- breakself(A2 = oath-taker, A3 = rival, R0 = oath this action breaks) ----
@@ -2597,11 +4670,34 @@ ik_w:
   ADD R0, #1
   STW R0, [A2+#FWINS]
 ik_done:
+  LDW R0, [kokind]
+  CMP R0, #0
+  BNE ik_time
+  MOV R0, #72              ; a KO plays its fall in slow motion
+  STW R0, [slowT]
+  MOV R0, #SX_KO
+  CALL sfxplay
+  RET
+ik_time:
+  MOV R0, #0
+  STW R0, [slowT]
   MOV R0, #90
   CALL sfxblip
   RET
 
 koframe:
+  LDW R0, [slowT]          ; slow motion: the scene moves every third frame
+  CMP R0, #0
+  BEQ kf_run
+  SUB R0, #1
+  STW R0, [slowT]
+  MOV R1, #0
+  MOV R2, #3
+  DIVU R0, R2
+  CMP R1, #0
+  BEQ kf_run
+  JMP kf_draw
+kf_run:
   LDW R0, [gT]
   ADD R0, #1
   STW R0, [gT]
@@ -2632,6 +4728,11 @@ kf_wd:
   AND R0, #START
   BEQ kf_draw
 kf_next:
+  LDW R0, [mode]           ; the demo is one round
+  CMP R0, #3
+  BNE kf_nd
+  JMP demoend
+kf_nd:
   LDA A2, #F1              ; match over?
   LDW R0, [A2+#FWINS]
   CMP R0, #2
@@ -2819,6 +4920,11 @@ initmatch:
   CALL savepicks
 im_nb:
   LDW R0, [rival]
+  CMP R0, #2
+  BNE im_nbn
+  MOV R1, #1
+  STW R1, [bonusnx]
+im_nbn:
   CMP R0, #NRIVAL
   BLT im_ret
   MOV R0, #G_CHAMP
@@ -2891,6 +4997,24 @@ mf_vw:
   LDA A1, #sREMATCH
   CALL ctext
 mf_q:
+  LDA A2, #F1              ; the winner's line
+  LDW R0, [A2+#FWINS]
+  CMP R0, #2
+  BGE mf_qw
+  LDA A2, #F2
+mf_qw:
+  LDW R0, [A2+#FBODY]
+  CMP R0, #NBODY
+  BGE mf_qn
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #QUOTETAB
+  ADD A0, R1
+  LDADDR A1, [A0]
+  MOV R1, #120
+  CALL ctext
+mf_qn:
   MOV R1, #96
   LDA A1, #sQUIT
   CALL ctext
@@ -2913,6 +5037,15 @@ champframe:
   CALL inittitle
   RET
 chf_draw:
+  LDW R0, [gT]
+  CMP R0, #1
+  BNE chf_np
+  MOV R4, #3               ; first frame: a plaque for the ending
+  MOV R5, #10
+  MOV R6, #37
+  MOV R7, #18
+  CALL panel
+chf_np:
   CALL oambegin
   MOV R1, #40
   LDA A1, #sCHAMP1
@@ -2920,9 +5053,25 @@ chf_draw:
   MOV R1, #60
   LDA A1, #sCHAMP2
   CALL cbig
+  LDA A2, #F1              ; the champion's own ending
+  LDW R0, [A2+#FBODY]
+  MOV R1, R0
+  SHL R1, #1
+  ADD R1, R0
+  LDA A0, #ENDTAB
+  ADD A0, R1
+  LDADDR A1, [A0]
   MOV R1, #88
+  CALL endlines
+  LDW R0, [gT]
+  CMP R0, #60
+  BLT chf_ns
+  AND R0, #32
+  BNE chf_ns
+  MOV R1, #212
   LDA A1, #sCHAMP3
   CALL ctext
+chf_ns:
   LDA A2, #F1
   MOV R0, #ST_WIN
   STW R0, [A2+#FST]
@@ -2932,11 +5081,56 @@ chf_draw:
   CALL drawhud
   RET
 
+; ---- endlines(A1 = text, lines split by 10; R1 = y): centred lines 12 px apart ----
+endlines:
+  LDA A0, #lbuf
+el_cp:
+  LDB R0, [A1]
+  INC A1
+  CMP R0, #10
+  BEQ el_out
+  CMP R0, #0
+  BEQ el_out
+  STB R0, [A0]
+  INC A0
+  BRA el_cp
+el_out:
+  PUSH R0
+  MOV R2, #0
+  STB R2, [A0]
+  PUSH R1
+  PUSHA A1
+  LDA A1, #lbuf
+  CALL ctext
+  POPA A1
+  POP R1
+  POP R0
+  ADD R1, #12
+  CMP R0, #0
+  BNE endlines
+  RET
+
 ; ============================ CPU ============================
 ; ---- cputhink(A2 = CPU, A3 = player): sets FAIPAD (held directions) and FAIATK ----
 cputhink:
-  LDW R0, [A2+#FST]        ; mid-jump: strike on the way down when close
-  CMP R0, #ST_JUMP
+  LDW R0, [A2+#FST]
+  CMP R0, #ST_DIZZY        ; dizzy: mash (level 0 just waits it out)
+  BNE ct_nd
+  CALL nextrng
+  AND R0, #$F0
+  LDW R1, [A2+#FAI]
+  CMP R1, #0
+  BNE ct_m
+  MOV R0, #0
+ct_m:
+  STW R0, [A2+#FAIPAD]
+  RET
+ct_nd:
+  CMP R0, #ST_ATK          ; a normal just connected: maybe chain or cancel
+  BNE ct_nx
+  JMP cpufollow
+ct_nx:
+  CMP R0, #ST_JUMP         ; mid-jump: strike on the way down when close
   BNE ct_gnd
   LDW R0, [A2+#FVY]
   CMP R0, #0
@@ -2944,7 +5138,7 @@ cputhink:
   CALL cpudist
   CMP R0, #60
   BGT ct_hold
-  MOV R0, #AK_AKICK+1
+  MOV R0, #AK_AHKICK+1
   CALL cpuhonour
   STW R0, [A2+#FAIATK]
   BRA ct_hold
@@ -2991,6 +5185,42 @@ ct_decide:
   CALL nextrng
   AND R0, #15
   MOV R4, R0               ; R4 = roll 0..15
+  LDW R0, [A3+#FPJT]       ; a Seal Bolt coming: block it or jump it
+  CMP R0, #0
+  BEQ ct_nobolt
+  LDW R0, [A3+#FPJX]
+  LDW R1, [A2+#FX]
+  SUB R0, R1
+  CMP R0, #0
+  BGE ct_bd
+  NEG R0
+ct_bd:
+  CMP R0, #110
+  BGT ct_nobolt
+  LDW R0, [A2+#FAI]
+  CMP R0, #0
+  BEQ ct_nobolt
+  LDA A0, #AIBLOCK
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R4, R0
+  BGE ct_nobolt
+  MOV R0, R4
+  AND R0, #1
+  BNE ct_bj
+  LDW R0, [A2+#FOATH]      ; honouring No Guard: jump it instead
+  CMP R0, #OA_GUARD
+  BEQ ct_bj
+  STW R7, [A2+#FAIPAD]
+  MOV R0, #24
+  STW R0, [A2+#FAIHOLD]
+  RET
+ct_bj:
+  MOV R0, R6
+  OR R0, #UP
+  STW R0, [A2+#FAIPAD]
+  RET
+ct_nobolt:
   LDW R0, [A3+#FST]        ; the player is attacking: maybe guard
   CMP R0, #ST_ATK
   BNE ct_noatk
@@ -3032,15 +5262,26 @@ ct_noatk:
   CMP R0, #$F000
   BGE ct_noair
   LDW R0, [A2+#FAI]
-  CMP R0, #2
+  CMP R0, #1
   BLT ct_noair
   CALL cpudist
   CMP R0, #64
   BGT ct_noair
   CMP R4, #10
   BGE ct_noair
-  MOV R0, #AK_RISE+1
-  BRA ct_attack
+  LDW R1, [A2+#FAI]        ; uppercut; level 2+ mixes in its anti-air special
+  CMP R1, #2
+  BLT ct_aau
+  CMP R4, #5
+  BGE ct_aau
+  MOV R1, #1
+  CALL cpuint
+  CMP R0, #0
+  BNE ct_aa
+ct_aau:
+  MOV R0, #AK_CHPUNCH+1
+ct_aa:
+  JMP ct_attack
 ct_noair:
   LDW R0, [A2+#FMTR]       ; full meter and close: Oath Surge
   CMP R0, #MTRMAX
@@ -3061,11 +5302,30 @@ ct_nosup:
   BGE ct_far1
   CMP R0, #150
   BGT ct_far1
-  MOV R0, #AK_RUSH+1
-  BRA ct_attack
+  MOV R1, #2
+  CALL cpuint
+  CMP R0, #0
+  BEQ ct_far0
+  JMP ct_attack
+ct_far0:
+  CALL cpudist
+  LDW R1, [A2+#FAI]
 ct_far1:
-  CMP R1, #1
+  CMP R1, #1               ; level 1+: a Seal Bolt from range
   BLT ct_walkin
+  CMP R4, #7
+  BGE ct_fj
+  CMP R0, #120
+  BLT ct_fj
+  LDW R0, [A2+#FPJT]
+  CMP R0, #0
+  BNE ct_fj
+  MOV R1, #0
+  CALL cpuint
+  CMP R0, #0
+  BEQ ct_fj
+  JMP ct_attack
+ct_fj:
   CMP R4, #12
   BLT ct_walkin
   MOV R0, R6               ; jump forward
@@ -3080,10 +5340,12 @@ ct_walkin:
 ct_mid:
   CMP R0, #44
   BLE ct_close
-  CMP R4, #6               ; mid range: step in, kick, sweep, or jump in
+  CMP R4, #6               ; mid range: step in, kicks, sweep, wait, or jump in
   BLT ct_walkin
-  CMP R4, #9
+  CMP R4, #8
   BLT ct_kick
+  CMP R4, #9
+  BLT ct_hkick
   CMP R4, #12
   BLT ct_sweep
   CMP R4, #14
@@ -3095,16 +5357,28 @@ ct_mid:
 ct_kick:
   MOV R0, #AK_KICK+1
   BRA ct_attack
+ct_hkick:
+  MOV R1, #4               ; its mix-up special if it has one
+  CALL cpuint
+  CMP R0, #0
+  BNE ct_hk2
+  MOV R0, #AK_HKICK+1
+ct_hk2:
+  BRA ct_attack
 ct_sweep:
   MOV R0, #AK_SWEEP+1
   BRA ct_attack
 ct_wait:
   RET
 ct_close:
-  CMP R4, #6               ; close: jab, crouch jab, kick, back off, or guard
+  CMP R4, #4               ; close: jab, low kick, throw, heavy punch, kick, back off, or guard
   BLT ct_punch
+  CMP R4, #6
+  BLT ct_clk
   CMP R4, #8
-  BLT ct_cpunch
+  BLT ct_throw
+  CMP R4, #10
+  BLT ct_hp
   CMP R4, #11
   BLT ct_kick
   CMP R4, #13
@@ -3116,8 +5390,34 @@ ct_close:
 ct_punch:
   MOV R0, #AK_PUNCH+1
   BRA ct_attack
-ct_cpunch:
-  MOV R0, #AK_CPUNCH+1
+ct_clk:
+  MOV R0, #AK_CLK+1
+  BRA ct_attack
+ct_throw:
+  LDW R0, [A2+#FAI]        ; level 1+ throws (or command-grabs) when the player is in reach
+  CMP R0, #0
+  BEQ ct_hp
+  MOV R1, #3
+  CALL cpuint
+  CMP R0, #0
+  BEQ ct_nthr
+  PUSH R0
+  MOV R3, #52
+  CALL throwable
+  MOV R1, R0
+  POP R0
+  CMP R1, #0
+  BNE ct_atk2
+ct_nthr:
+  MOV R3, #THROWR
+  CALL throwable
+  CMP R0, #0
+  BEQ ct_hp
+  MOV R0, #AK_THROW+1
+ct_atk2:
+  BRA ct_attack
+ct_hp:
+  MOV R0, #AK_HPUNCH+1
   BRA ct_attack
 ct_backoff:
   LDW R0, [A2+#FAI]        ; honouring Stand Fast: never back off
@@ -3154,26 +5454,11 @@ cpuhonour:
   LDW R1, [A2+#FOATH]
   CMP R1, #OA_FISTS
   BNE ch_sky
-  CMP R0, #AK_KICK+1       ; Fists Only: kicks become punches
-  BEQ ch_p
-  CMP R0, #AK_SWEEP+1
-  BEQ ch_cp
-  CMP R0, #AK_AKICK+1
-  BEQ ch_ap
-  CMP R0, #AK_SURGE+1
-  BEQ ch_r
-  RET
-ch_p:
-  MOV R0, #AK_PUNCH+1
-  RET
-ch_cp:
-  MOV R0, #AK_CPUNCH+1
-  RET
-ch_ap:
-  MOV R0, #AK_APUNCH+1
-  RET
-ch_r:
-  MOV R0, #AK_RUSH+1
+  SUB R0, #1               ; Fists Only: every kick becomes its punch
+  LDA A0, #FISTMAP
+  ADD A0, R0
+  LDB R0, [A0]
+  ADD R0, #1
   RET
 ch_sky:
   CMP R1, #OA_SKY
@@ -3182,8 +5467,97 @@ ch_sky:
   BEQ ch_ok
   CMP R0, #AK_AKICK+1
   BEQ ch_ok
+  CMP R0, #AK_AHPUNCH+1
+  BEQ ch_ok
+  CMP R0, #AK_AHKICK+1
+  BEQ ch_ok
   MOV R0, #0
 ch_ok:
+  RET
+
+; ---- cpufollow: once a normal hits, maybe chain a light or cancel into a special ----
+cpufollow:
+  LDW R0, [A2+#FHIT]
+  CMP R0, #0
+  BEQ cw_out0
+  LDW R0, [A2+#FAICX]
+  CMP R0, #0
+  BNE cw_out0
+  LDW R0, [A3+#FST]        ; only on a hit (a blocked string stops)
+  CMP R0, #ST_HURT
+  BNE cw_out0
+  MOV R0, #1
+  STW R0, [A2+#FAICX]
+  LDW R1, [A2+#FAI]
+  CMP R1, #0
+  BNE cw_lv
+cw_out0:
+  JMP ct_gnd
+cw_lv:
+  CALL atkrec
+  LDB R5, [A0+#AT_FL2]
+  CALL nextrng
+  AND R0, #15
+  MOV R4, R0
+  LDW R1, [A2+#FAI]
+  LDA A0, #AICOMBO
+  ADD A0, R1
+  LDB R1, [A0]
+  CMP R4, R1
+  BLT cw_go
+  JMP ct_gnd
+cw_go:
+  MOV R0, R5
+  AND R0, #F2_CHAIN
+  BEQ cw_sp
+  CMP R4, #3
+  BGE cw_sp
+  LDW R0, [A2+#FATK]       ; chain the same light again
+  ADD R0, #1
+  BRA cw_set
+cw_sp:
+  MOV R0, R5
+  AND R0, #F2_CXL
+  BEQ cw_out
+  MOV R1, R4               ; its rush, or its bolt when one is free
+  AND R1, #1
+  BEQ cw_rush
+  LDW R1, [A2+#FPJT]
+  CMP R1, #0
+  BNE cw_rush
+  MOV R1, #0
+  CALL cpuint
+  CMP R0, #0
+  BNE cw_set
+cw_rush:
+  MOV R1, #2
+  CALL cpuint
+  CMP R0, #0
+  BNE cw_set
+  JMP ct_gnd
+cw_set:
+  CALL cpuhonour
+  CMP R0, #0
+  BEQ cw_out
+  STW R0, [A2+#FAIATK]
+  RET
+cw_out:
+  JMP ct_gnd
+
+; ---- cpuint(A2, R1 = 0 ranged, 1 anti-air, 2 rush, 3 grab, 4 mix-up) -> R0 = attack + 1, or 0 ----
+cpuint:
+  LDW R0, [A2+#FBODY]
+  SHL R0, #3
+  ADD R0, R1
+  LDA A0, #CHAI
+  ADD A0, R0
+  LDB R0, [A0]
+  CMP R0, #$FF
+  BEQ ci_no
+  ADD R0, #1
+  RET
+ci_no:
+  MOV R0, #0
   RET
 
 ; ---- cpudist -> R0 = |x1 - x2| ----
@@ -3332,6 +5706,132 @@ dsp_f:
   STW R2, [sprpri]
   CALL emittile
 dsp_ret:
+  RET
+
+; ---- drawbolts: Seal Bolts in flight, then dizzy stars ----
+drawbolts:
+  MOV R0, #6
+  STW R0, [sprpri]
+  LDA A2, #F1
+  CALL emitbolt
+  LDA A2, #F2
+  CALL emitbolt
+  LDA A2, #F1
+  CALL emitstars
+  LDA A2, #F2
+  CALL emitstars
+  RET
+emitbolt:
+  LDW R0, [A2+#FPJT]
+  CMP R0, #0
+  BEQ eb_ret
+  MOV R5, #BOLT
+  AND R0, #4
+  BEQ eb_f
+  ADD R5, #4
+eb_f:
+  MOV R6, #SZ16
+  OR R6, #PB_SPARK
+  LDW R0, [A2+#FPJV]
+  CMP R0, #0
+  BGE eb_r
+  OR R6, #$40
+eb_r:
+  LDW R0, [A2+#FPJX]
+  LDW R1, [cam]
+  SUB R0, R1
+  SUB R0, #8
+  MOV R1, #GROUNDY-BOLTY-8
+  CALL emittile
+eb_ret:
+  RET
+emitstars:
+  LDW R0, [A2+#FST]
+  CMP R0, #ST_DIZZY
+  BNE est_ret
+  MOV R5, #STARS
+  LDW R0, [A2+#FT]
+  AND R0, #8
+  BEQ est_f
+  ADD R5, #4
+est_f:
+  MOV R6, #SZ16
+  OR R6, #PB_SPARK
+  LDW R0, [A2+#FX]
+  LDW R1, [cam]
+  SUB R0, R1
+  SUB R0, #8
+  MOV R1, #SPRY-2
+  CALL emittile
+est_ret:
+  RET
+
+; ---- drawcombo: "n HITS" on each side, and "TECH" ----
+drawcombo:
+  MOV R4, #0
+  CALL combo1
+  MOV R4, #1
+  CALL combo1
+  LDW R0, [techT]
+  CMP R0, #0
+  BEQ dc_ret
+  SUB R0, #1
+  STW R0, [techT]
+  MOV R1, #60
+  LDA A1, #sTECH
+  CALL cbig
+dc_ret:
+  RET
+combo1:
+  MOV R3, R4
+  SHL R3, #1
+  LDA A0, #cmbT
+  ADD A0, R3
+  LDW R1, [A0]
+  CMP R1, #0
+  BEQ c1_ret
+  SUB R1, #1
+  STW R1, [A0]
+  LDA A0, #cmbN
+  ADD A0, R3
+  LDW R0, [A0]
+  LDA A1, #cmbstr
+  CMP R0, #10
+  BLT c1_one
+  MOV R1, #0
+c1_t:
+  SUB R0, #10
+  ADD R1, #1
+  CMP R0, #10
+  BGE c1_t
+  ADD R1, #48
+  STB R1, [A1]
+  INC A1
+c1_one:
+  ADD R0, #48
+  STB R0, [A1]
+  INC A1
+  LDA A0, #sHITS
+c1_cp:
+  LDB R0, [A0]
+  STB R0, [A1]
+  INC A0
+  INC A1
+  CMP R0, #0
+  BNE c1_cp
+  LDA A1, #cmbstr
+  MOV R0, #8
+  CMP R4, #0
+  BEQ c1_x
+  CALL strlen
+  SHL R0, #4
+  NEG R0
+  ADD R0, #312
+c1_x:
+  MOV R1, #52
+  LDA A1, #cmbstr
+  CALL btext
+c1_ret:
   RET
 
 ; ---- drawfighters: the attacker first (lower OAM index = on top), then shadows ----
@@ -3798,6 +6298,11 @@ pr_done:
   RET
 
 ; ============================ palette / DMA ============================
+; ---- homestage(R0 = body): that character's stage ----
+homestage:
+  LDA A0, #CHSTAGE
+  ADD A0, R0
+  LDB R0, [A0]
 ; ---- setstage(R0): sky gradient -> SKYTAB, sky bank 1 ----
 setstage:
   MOV R1, #STAGEREC
@@ -3815,6 +6320,18 @@ ss_sky:
   BNE ss_sky
   MOV R0, #34
   MOV R1, #24
+  CALL dmapal
+  ADD A0, #24              ; the courtyard, lit for the time of day: bank 2, banks 6-7, banks 10-11
+  MOV R0, #64
+  MOV R1, #32
+  CALL dmapal
+  ADD A0, #32
+  MOV R0, #192
+  MOV R1, #64
+  CALL dmapal
+  ADD A0, #64
+  MOV R0, #320
+  MOV R1, #64
   CALL dmapal
   RET
 
@@ -3908,7 +6425,22 @@ sp_lp:
   RET
 
 ; ============================ audio ============================
+; ---- sfxplay(R0 = sound): a per-frame pitch/volume sequence on square 0 ----
+sfxplay:
+  LDA A0, #SFXTAB
+  SHL R0, #1
+  ADD A0, R0
+  LDW R0, [A0]
+  STW R0, [sfxP]
+  MOV R0, #0
+  STW R0, [sfxT]
+  RET
+
 sfxblip:
+  PUSH R0
+  MOV R0, #0
+  STW R0, [sfxP]
+  POP R0
   STW R0, [SQ0_PERIOD]
   MOV R0, #10
   STB R0, [SQ0_VOL]
@@ -3929,6 +6461,27 @@ noisehit:
   RET
 
 sfxtick:
+  LDW R0, [sfxP]
+  CMP R0, #0
+  BEQ sx_b
+  LDA A0, #SFXDATA
+  ADD A0, R0
+  LDW R1, [A0]
+  CMP R1, #0
+  BNE sx_on
+  STW R1, [sfxP]
+  STB R1, [SQ0_CTRL]
+  BRA sx_n
+sx_on:
+  STW R1, [SQ0_PERIOD]
+  LDW R1, [A0+#2]
+  STB R1, [SQ0_VOL]
+  MOV R1, #1
+  STB R1, [SQ0_CTRL]
+  ADD R0, #4
+  STW R0, [sfxP]
+  BRA sx_n
+sx_b:
   LDW R0, [sfxT]
   CMP R0, #0
   BEQ sx_n
@@ -3991,24 +6544,79 @@ mt_adv:
   RET
 
 ; ============================ data ============================
-; ---- attack table: 16 bytes per attack (AT_* fields) ----
+; ---- attack table: 32 bytes per attack (AT_* fields, then AT_FL2 and padding) ----
 ATKTAB:
   ;  S  A   R  dmg hs  bs  x0  x1  y0  y1 kind flags                    p0         p1          dash p2
-  DB 4, 3,  8,  8, 14, 10,  8, 40, 30, 50, 0, AF_GROUND,               PO_GUARD,  PO_PUNCH,   0, PO_PUNCH
-  DB 7, 4, 13, 12, 18, 12,  8, 50, 16, 40, 0, AF_GROUND+AF_KICK,       PO_GUARD,  PO_KICK,    0, PO_KICK
-  DB 4, 3,  8,  7, 13,  9,  8, 38, 18, 34, 0, AF_GROUND,               PO_CROUCH, PO_CPUNCH,  0, PO_CPUNCH
-  DB 6, 4, 14, 10, 16, 12,  8, 50,  0, 14, 1, AF_GROUND+AF_KICK,       PO_CROUCH, PO_LOWKICK, 0, PO_LOWKICK
-  DB 3, 6,  0,  9, 16, 12,  4, 36, 10, 40, 2, AF_AIR,                  PO_JUMP,   PO_AIRPUNCH, 0, PO_JUMP
-  DB 4, 6,  0, 11, 18, 12,  4, 44,  0, 30, 2, AF_AIR+AF_KICK,          PO_JUMP,   PO_AIRKICK, 0, PO_JUMP
-  DB 8, 14, 16, 14, 22, 14, 4, 40, 20, 48, 0, AF_GROUND+AF_KD,         PO_CROUCH, PO_PUNCH,   5, PO_GUARD
-  DB 3, 10, 22, 16, 24, 14, 0, 30, 30, 80, 0, AF_GROUND+AF_KD+AF_INV+AF_RISE, PO_CROUCH, PO_RISE, 0, PO_JUMP
-  DB 10, 30, 20, 9, 12, 10, 4, 44, 10, 50, 0, AF_GROUND+AF_KICK+AF_MULTI, PO_CROUCH, PO_PUNCH, 3, PO_GUARD
+  DB 3, 2,  6,  6, 12,  9,  8, 40, 30, 50, 0, AF_GROUND,               PO_GUARD,  PO_PUNCH,   0, PO_PUNCH     ; 0 LP
+  DB F2_CHAIN+F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 5, 3, 10,  9, 15, 11,  8, 48, 16, 40, 0, AF_GROUND+AF_KICK,       PO_GUARD,  PO_KICK,    0, PO_KICK      ; 1 LK
+  DB F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 3, 2,  7,  5, 12,  9,  8, 38, 18, 34, 0, AF_GROUND,               PO_CROUCH, PO_CPUNCH,  0, PO_CPUNCH    ; 2 c.LP
+  DB F2_CHAIN+F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 7, 4, 20, 12, 16, 13,  8, 54,  0, 14, 1, AF_GROUND+AF_KICK+AF_KD, PO_CROUCH, PO_LOWKICK, 0, PO_LOWKICK   ; 3 sweep (c.HK)
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 3, 6,  0,  7, 14, 10,  4, 36, 10, 40, 2, AF_AIR,                  PO_JUMP,   PO_AIRPUNCH, 0, PO_JUMP     ; 4 j.LP
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 4, 6,  0,  9, 16, 11,  4, 44,  0, 30, 2, AF_AIR+AF_KICK,          PO_JUMP,   PO_AIRKICK, 0, PO_JUMP      ; 5 j.LK
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 8, 14, 16, 14, 22, 14, 4, 40, 20, 48, 0, AF_GROUND+AF_KD,         PO_CROUCH, PO_HPUNCH,  5, PO_GUARD     ; 6 Gate Rush
+  DB F2_SPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 3, 10, 22, 16, 24, 14, 0, 30, 30, 80, 0, AF_GROUND+AF_KD+AF_INV+AF_RISE, PO_CROUCH, PO_RISE, 0, PO_JUMP  ; 7 Palm Rise
+  DB F2_SPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 10, 30, 20, 9, 12, 10, 4, 44, 10, 50, 0, AF_GROUND+AF_KICK+AF_MULTI, PO_CROUCH, PO_PUNCH, 3, PO_GUARD  ; 8 Oath Surge
+  DB F2_SPEC, PO_KICK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 6, 3, 16, 13, 18, 14,  8, 52, 28, 52, 0, AF_GROUND,               PO_GUARD,  PO_HPUNCH,  0, PO_HPUNCH    ; 9 HP
+  DB F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 8, 4, 18, 15, 20, 15,  8, 56, 24, 54, 0, AF_GROUND+AF_KICK,       PO_GUARD,  PO_HKICK,   0, PO_HKICK     ; 10 HK
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 5, 4, 16, 12, 18, 14,  0, 32, 24, 72, 0, AF_GROUND,               PO_CROUCH, PO_RISE,    0, PO_CROUCH    ; 11 c.HP uppercut
+  DB F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 4, 3,  8,  5, 12,  9,  8, 46,  0, 14, 1, AF_GROUND+AF_KICK,       PO_CROUCH, PO_LOWKICK, 0, PO_CROUCH    ; 12 c.LK
+  DB F2_CHAIN+F2_CXL, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 4, 6,  0, 11, 17, 12,  4, 40, 10, 44, 2, AF_AIR,                  PO_JUMP,   PO_AIRPUNCH, 0, PO_JUMP     ; 13 j.HP
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 5, 6,  0, 13, 19, 13,  4, 48,  0, 32, 2, AF_AIR+AF_KICK,          PO_JUMP,   PO_AIRKICK, 0, PO_JUMP      ; 14 j.HK
+  DB 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 10, 1, 26, 10, 16, 12, 0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    3, PO_FIRE      ; 15 Seal Bolt (A)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 10, 1, 26, 10, 16, 12, 0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    5, PO_FIRE      ; 16 Seal Bolt (X)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 3, 2, 22, 16,  0,  0,  0, THROWR, 10, 50, 0, AF_GROUND+AF_KD,     PO_GRAB,   PO_GRAB,    0, PO_GUARD     ; 17 throw (x1 = range)
+  DB F2_THROW, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 3, 2, 22, 16,  0,  0,  0, THROWR, 10, 50, 0, AF_GROUND+AF_KD,     PO_GRAB,   PO_GRAB,    0, PO_GUARD     ; 18 back throw
+  DB F2_THROW+F2_BACK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 8, 1, 22,  7, 14, 10,  0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    6, PO_FIRE      ; 19 Needle Bolt (A)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 8, 1, 22,  7, 14, 10,  0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    8, PO_FIRE      ; 20 Needle Bolt (X)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 13, 1, 28, 14, 20, 14, 0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    2, PO_FIRE      ; 21 Ember Bolt (A)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 13, 1, 28, 14, 20, 14, 0,  0,  0,  0, 0, AF_GROUND,               PO_GUARD,  PO_FIRE,    3, PO_FIRE      ; 22 Ember Bolt (X)
+  DB F2_SPEC+F2_PROJ, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 12, 16, 18, 18, 22, 16, 4, 44, 16, 50, 0, AF_GROUND+AF_KD,         PO_CROUCH, PO_HPUNCH,  4, PO_GUARD     ; 23 Ram Charge
+  DB F2_SPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 4, 10, 22, 15, 24, 14, 0, 32, 24, 78, 0, AF_GROUND+AF_KD+AF_INV+AF_RISE+AF_KICK, PO_CROUCH, PO_HKICK, 0, PO_JUMP  ; 24 Lark Rise
+  DB F2_SPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 7, 24, 16,  6, 14, 10,  0, 44, 20, 48, 0, AF_GROUND+AF_KICK+AF_MULTI, PO_GUARD, PO_HKICK,  4, PO_GUARD     ; 25 Gale Wheel
+  DB F2_SPEC, PO_KICK, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 5, 2, 30, 24,  0,  0,  0, 52, 10, 50, 0, AF_GROUND+AF_KD,         PO_GRAB,   PO_GRAB,    0, PO_GUARD     ; 26 Gate Crusher (command grab, range 52)
+  DB F2_THROW, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  DB 14, 4, 18, 18, 22, 16, 4, 44,  0, 44, 2, AF_GROUND+AF_KD,         PO_RISE,   PO_HPUNCH,  0, PO_CROUCH    ; 27 Bell Smash (overhead)
+  DB F2_SPEC, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
-; motion patterns, newest first (1 D, 2 DF, 3 F)
+; any request made in the air becomes an air attack (index = requested attack)
+AIRMAP:
+  DB AK_APUNCH, AK_AKICK, AK_APUNCH, AK_AHKICK, AK_APUNCH, AK_AKICK, AK_AHPUNCH, AK_AHPUNCH, AK_AHKICK
+  DB AK_AHPUNCH, AK_AHKICK, AK_AHPUNCH, AK_AKICK, AK_AHPUNCH, AK_AHKICK, AK_APUNCH, AK_AHPUNCH, AK_AHPUNCH, AK_AHPUNCH
+  DB AK_APUNCH, AK_AHPUNCH, AK_APUNCH, AK_AHPUNCH, AK_AHPUNCH, AK_AHKICK, AK_AHKICK, AK_AHPUNCH, AK_AHPUNCH
+
+; motion patterns, newest first (1 D, 2 DF, 3 F, 4 B, 5 DB)
 MO_QCF:
   DB 3, 2, 1
 MO_DP:
   DB 2, 1, 3
+MO_QCB:
+  DB 4, 5, 1
 
 WALKP:
   DB PO_WALK1, PO_GUARD, PO_WALK2, PO_GUARD
@@ -4023,6 +6631,96 @@ BODYBUILD:                             ; RIO MARA TANK KENJI ZED FOX LIN WOLF
   DB 1, 0, 3, 1, 0, 1, 0, 2
 
 ; ---- rivals: picks (body, skin, hair, top, legs, shoes), AI level, oath (0 = random) ----
+; ---- sound sequences: DW period, volume per frame; period 0 ends ----
+SFXDATA:
+  DW 0, 0
+sx_rise:
+  DW 160, 13, 148, 12, 136, 12, 123, 11, 111, 11, 99, 10
+  DW 87, 10, 74, 9, 62, 9, 50, 8
+  DW 0, 0
+sx_bolt:
+  DW 90, 13, 90, 13, 90, 12, 80, 12, 70, 11, 80, 10
+  DW 70, 9, 80, 8, 70, 7, 80, 6, 70, 5, 80, 4
+  DW 70, 3, 80, 3
+  DW 0, 0
+sx_rush:
+  DW 220, 12, 200, 12, 240, 11, 210, 11, 250, 10, 220, 10
+  DW 260, 9, 230, 9, 270, 8, 240, 8, 280, 7, 250, 7
+  DW 0, 0
+sx_smash:
+  DW 60, 14, 82, 13, 104, 13, 127, 12, 149, 11, 171, 11
+  DW 193, 10, 216, 9, 238, 9, 260, 8
+  DW 0, 0
+sx_super:
+  DW 120, 13, 120, 13, 95, 13, 95, 13, 80, 13, 80, 13
+  DW 60, 13, 60, 13, 120, 13, 120, 13, 95, 13, 95, 13
+  DW 80, 13, 80, 13, 60, 13, 60, 13, 120, 13, 120, 13
+  DW 95, 13, 95, 13, 80, 13, 80, 13, 60, 13, 60, 13
+  DW 0, 0
+sx_ko:
+  DW 70, 14, 72, 14, 75, 14, 79, 13, 83, 13, 88, 13
+  DW 94, 13, 100, 13, 107, 12, 114, 12, 122, 12, 130, 12
+  DW 138, 11, 147, 11, 156, 11, 166, 11, 175, 11, 185, 10
+  DW 196, 10, 206, 10, 217, 10, 228, 10, 240, 9, 251, 9
+  DW 263, 9, 276, 9, 288, 8, 301, 8, 314, 8, 327, 8
+  DW 340, 8, 354, 7, 368, 7, 382, 7, 396, 7, 411, 7
+  DW 425, 6, 440, 6, 455, 6, 471, 6, 486, 5, 502, 5
+  DW 518, 5, 534, 5, 550, 5, 567, 4, 583, 4, 600, 4
+  DW 0, 0
+sx_block:
+  DW 40, 12, 40, 10, 45, 6
+  DW 0, 0
+sx_throw:
+  DW 100, 12, 140, 11, 180, 10, 220, 9, 260, 8
+  DW 0, 0
+SFXTAB:
+  DW 0, sx_rise-SFXDATA, sx_bolt-SFXDATA, sx_rush-SFXDATA, sx_smash-SFXDATA, sx_super-SFXDATA, sx_ko-SFXDATA, sx_block-SFXDATA, sx_throw-SFXDATA
+ATKSFX:                    ; sound per attack row (0 = the plain swish)
+  DB 0, 0, 0, 0, 0, 0, SX_RUSH, SX_RISE, SX_SUPER, 0, 0, 0, 0, 0, 0, SX_BOLT, SX_BOLT, SX_THROW, SX_THROW, SX_BOLT, SX_BOLT, SX_BOLT, SX_BOLT, SX_RUSH, SX_RISE, SX_RUSH, SX_THROW, SX_SMASH
+ENDTAB:                    ; arcade endings by character (lines split by 10)
+  DA sEND0, sEND1, sEND2, sEND3, sEND4, sEND5, sEND6, sEND7
+sEND0:
+  DB 'R', 'I', 'O', 32, 'L', 'E', 'F', 'T', 32, 'T', 'H', 'E', 32, 'P', 'A', 'L', 'M', 'G', 'A', 'T', 'E', 32, 'A', 'T', 32, 'D', 'A', 'W', 'N', 46, 10
+  DB 'H', 'E', 32, 'D', 'I', 'D', 32, 'N', 'O', 'T', 32, 'S', 'T', 'A', 'Y', 32, 'T', 'O', 32, 'R', 'U', 'L', 'E', 32, 'I', 'T', 46, 10
+  DB 'T', 'H', 'E', 32, 'R', 'O', 'A', 'D', 32, 'W', 'A', 'S', 32, 'A', 'L', 'L', 32, 'H', 'E', 32, 'E', 'V', 'E', 'R', 10
+  DB 'W', 'A', 'N', 'T', 'E', 'D', 46, 32, 'I', 'T', 32, 'S', 'T', 'I', 'L', 'L', 32, 'I', 'S', 46, 0
+sEND1:
+  DB 'M', 'A', 'R', 'A', 32, 'R', 'A', 'N', 32, 'T', 'H', 'E', 32, 'W', 'A', 'L', 'L', 'S', 32, 'A', 'T', 32, 'N', 'O', 'O', 'N', 10
+  DB 'A', 'N', 'D', 32, 'R', 'A', 'N', 'G', 32, 'T', 'H', 'E', 32, 'G', 'A', 'T', 'E', 32, 'B', 'E', 'L', 'L', 32, 'T', 'W', 'I', 'C', 'E', 46, 10
+  DB 'N', 'O', 'B', 'O', 'D', 'Y', 32, 'S', 'A', 'W', 32, 'H', 'E', 'R', 32, 'D', 'O', 32, 'I', 'T', 46, 10
+  DB 'E', 'V', 'E', 'R', 'Y', 'B', 'O', 'D', 'Y', 32, 'H', 'E', 'A', 'R', 'D', 32, 'I', 'T', 46, 0
+sEND2:
+  DB 'T', 'A', 'N', 'K', 32, 'S', 'T', 'O', 'O', 'D', 32, 'A', 'T', 32, 'T', 'H', 'E', 32, 'G', 'A', 'T', 'E', 32, 'U', 'N', 'T', 'I', 'L', 10
+  DB 'T', 'H', 'E', 32, 'L', 'A', 'S', 'T', 32, 'R', 'I', 'V', 'A', 'L', 32, 'W', 'A', 'L', 'K', 'E', 'D', 32, 'A', 'W', 'A', 'Y', 46, 10
+  DB 'H', 'E', 32, 'I', 'S', 32, 'S', 'T', 'I', 'L', 'L', 32, 'S', 'T', 'A', 'N', 'D', 'I', 'N', 'G', 32, 'T', 'H', 'E', 'R', 'E', 46, 10
+  DB 'T', 'H', 'E', 32, 'G', 'A', 'T', 'E', 32, 'H', 'A', 'S', 32, 'N', 'E', 'V', 'E', 'R', 32, 'B', 'E', 'E', 'N', 32, 'S', 'A', 'F', 'E', 'R', 46, 0
+sEND3:
+  DB 'K', 'E', 'N', 'J', 'I', 32, 'L', 'I', 'T', 32, 'A', 32, 'L', 'A', 'M', 'P', 32, 'O', 'N', 32, 'T', 'H', 'E', 32, 'W', 'A', 'L', 'L', 10
+  DB 'F', 'O', 'R', 32, 'E', 'V', 'E', 'R', 'Y', 32, 'O', 'A', 'T', 'H', 32, 'H', 'E', 32, 'K', 'E', 'P', 'T', 46, 10
+  DB 'N', 'O', 'W', 32, 'A', 'T', 32, 'S', 'U', 'N', 'S', 'E', 'T', 32, 'T', 'H', 'E', 32, 'W', 'H', 'O', 'L', 'E', 10
+  DB 'P', 'A', 'L', 'M', 'G', 'A', 'T', 'E', 32, 'G', 'L', 'O', 'W', 'S', 46, 0
+sEND4:
+  DB 'A', 'T', 32, 'M', 'I', 'D', 'N', 'I', 'G', 'H', 'T', 32, 'T', 'H', 'E', 32, 'G', 'A', 'T', 'E', 32, 'K', 'E', 'Y', 'S', 10
+  DB 'W', 'E', 'N', 'T', 32, 'M', 'I', 'S', 'S', 'I', 'N', 'G', 46, 32, 'S', 'O', 32, 'D', 'I', 'D', 32, 'Z', 'E', 'D', 46, 10
+  DB 'B', 'Y', 32, 'M', 'O', 'R', 'N', 'I', 'N', 'G', 32, 'B', 'O', 'T', 'H', 32, 'W', 'E', 'R', 'E', 32, 'B', 'A', 'C', 'K', 46, 10
+  DB 'N', 'O', 'B', 'O', 'D', 'Y', 32, 'A', 'S', 'K', 'E', 'D', 46, 0
+sEND5:
+  DB 'F', 'O', 'X', 32, 'T', 'H', 'R', 'E', 'W', 32, 'A', 32, 'F', 'E', 'A', 'S', 'T', 32, 'I', 'N', 32, 'T', 'H', 'E', 10
+  DB 'C', 'O', 'U', 'R', 'T', 'Y', 'A', 'R', 'D', 32, 'A', 'N', 'D', 32, 'I', 'N', 'V', 'I', 'T', 'E', 'D', 32, 'E', 'V', 'E', 'R', 'Y', 10
+  DB 'R', 'I', 'V', 'A', 'L', 32, 'H', 'E', 32, 'H', 'A', 'D', 32, 'B', 'E', 'A', 'T', 'E', 'N', 46, 10
+  DB 'T', 'H', 'E', 'Y', 32, 'A', 'L', 'L', 32, 'C', 'A', 'M', 'E', 46, 32, 'O', 'N', 'E', 32, 'L', 'I', 'M', 'P', 'E', 'D', 46, 0
+sEND6:
+  DB 'L', 'I', 'N', 32, 'W', 'A', 'L', 'K', 'E', 'D', 32, 'D', 'O', 'W', 'N', 32, 'T', 'O', 32, 'T', 'H', 'E', 32, 'S', 'E', 'A', 10
+  DB 'A', 'N', 'D', 32, 'S', 'W', 'O', 'R', 'E', 32, 'O', 'N', 'E', 32, 'L', 'A', 'S', 'T', 32, 'O', 'A', 'T', 'H', 10
+  DB 'T', 'O', 32, 'T', 'H', 'E', 32, 'T', 'I', 'D', 'E', 46, 32, 'C', 'O', 'M', 'E', 32, 'B', 'A', 'C', 'K', 46, 10
+  DB 'I', 'T', 32, 'A', 'L', 'W', 'A', 'Y', 'S', 32, 'D', 'O', 'E', 'S', 46, 0
+sEND7:
+  DB 'W', 'O', 'L', 'F', 32, 'S', 'E', 'T', 32, 'T', 'H', 'E', 32, 'I', 'R', 'O', 'N', 32, 'S', 'E', 'A', 'L', 32, 'O', 'F', 10
+  DB 'T', 'H', 'E', 32, 'P', 'A', 'L', 'M', 'G', 'A', 'T', 'E', 32, 'I', 'N', 'T', 'O', 32, 'T', 'H', 'E', 32, 'W', 'A', 'L', 'L', 46, 10
+  DB 'I', 'R', 'O', 'N', 32, 'K', 'E', 'E', 'P', 'S', 32, 'I', 'T', 'S', 32, 'W', 'O', 'R', 'D', 46, 10
+  DB 'S', 'O', 32, 'D', 'O', 'E', 'S', 32, 'W', 'O', 'L', 'F', 46, 0
+CHSTAGE:                   ; home stage by character (HOME in the art tool)
+  DB 4, 1, 0, 2, 5, 6, 7, 3
 RIVTAB:
   DB 2, 3, 1, 6, 1, 3, 0, OA_FISTS
   DB 1, 1, 4, 2, 3, 1, 1, OA_STAND
@@ -4034,6 +6732,33 @@ AIREACT:
   DB 28, 18, 12, 7
 AIBLOCK:                               ; chance (of 16) to guard a nearby attack
   DB 3, 7, 11, 14
+AICOMBO:                               ; chance (of 16) to follow up a connected normal
+  DB 0, 5, 9, 13
+FISTMAP:                               ; Fists Only: each attack's no-kick stand-in
+  DB AK_PUNCH, AK_PUNCH, AK_CPUNCH, AK_CHPUNCH, AK_APUNCH, AK_APUNCH, AK_RUSH, AK_RISE, AK_RUSH
+  DB AK_HPUNCH, AK_HPUNCH, AK_CHPUNCH, AK_CPUNCH, AK_AHPUNCH, AK_AHPUNCH, AK_BOLTL, AK_BOLTH, AK_THROW, AK_BTHROW
+  DB AK_NEEDLEL, AK_NEEDLEH, AK_EMBERL, AK_EMBERH, AK_RAM, AK_CHPUNCH, AK_HPUNCH, AK_CRUSH, AK_BELL
+
+; ---- each fighter's specials: (light, heavy) attack for QCF+P, DP+P, QCB+P, QCB+K, DP+K ($FF none) ----
+CHSPEC:
+  DB AK_BOLTL, AK_BOLTH, AK_RISE, AK_RISE, AK_RUSH, AK_RUSH, $FF, $FF, $FF, $FF                    ; RIO
+  DB AK_NEEDLEL, AK_NEEDLEH, $FF, $FF, $FF, $FF, AK_WHEEL, AK_WHEEL, AK_LARK, AK_LARK              ; MARA
+  DB AK_RAM, AK_RAM, AK_BELL, AK_BELL, AK_CRUSH, AK_CRUSH, $FF, $FF, $FF, $FF                      ; TANK
+  DB AK_EMBERL, AK_EMBERH, AK_RISE, AK_RISE, $FF, $FF, AK_WHEEL, AK_WHEEL, $FF, $FF                ; KENJI
+  DB AK_NEEDLEL, AK_NEEDLEH, $FF, $FF, AK_RUSH, AK_RUSH, AK_WHEEL, AK_WHEEL, $FF, $FF              ; ZED
+  DB $FF, $FF, AK_RISE, AK_RISE, AK_RUSH, AK_RUSH, AK_WHEEL, AK_WHEEL, $FF, $FF                    ; FOX
+  DB AK_BOLTL, AK_BOLTH, $FF, $FF, $FF, $FF, AK_WHEEL, AK_WHEEL, AK_LARK, AK_LARK                  ; LIN
+  DB AK_RAM, AK_RAM, AK_RISE, AK_RISE, AK_CRUSH, AK_CRUSH, $FF, $FF, $FF, $FF                      ; WOLF
+; ---- the CPU's picks per fighter: ranged, anti-air, rush, command grab, mix-up ($FF none), 8 bytes ----
+CHAI:
+  DB AK_BOLTH, AK_RISE, AK_RUSH, $FF, $FF, 0, 0, 0
+  DB AK_NEEDLEH, AK_LARK, AK_WHEEL, $FF, $FF, 0, 0, 0
+  DB $FF, $FF, AK_RAM, AK_CRUSH, AK_BELL, 0, 0, 0
+  DB AK_EMBERH, AK_RISE, AK_WHEEL, $FF, $FF, 0, 0, 0
+  DB AK_NEEDLEH, $FF, AK_RUSH, $FF, AK_WHEEL, 0, 0, 0
+  DB $FF, AK_RISE, AK_RUSH, $FF, AK_WHEEL, 0, 0, 0
+  DB AK_BOLTH, AK_LARK, AK_WHEEL, $FF, $FF, 0, 0, 0
+  DB $FF, AK_RISE, AK_RAM, AK_CRUSH, $FF, 0, 0, 0
 
 ; ---- creator ----
 CHCOUNT:
@@ -4043,11 +6768,12 @@ PICKDEF:                               ; P1 defaults, then P2 defaults
   DB 3, 2, 4, 2, 1, 0
 SWTAB:
   DB 2, 3, 5, 2, 7, 3, 10, 3, 13, 2
-BODYTAB:                               ; ROM address of each body's NPOSE frames (34816 bytes apart)
-  DA bodies, bodies+34816, bodies+69632, bodies+104448
-  DA bodies+139264, bodies+174080, bodies+208896, bodies+243712
+BODYTAB:                               ; ROM address of each body's NPOSE frames (BODYSZ bytes apart)
+  DA bodies, bodies+45056, bodies+90112, bodies+135168
+  DA bodies+180224, bodies+225280, bodies+270336, bodies+315392
+  DA cartdata+32
 NAMETAB:
-  DA nRIO, nMARA, nTANK, nKENJI, nZED, nFOX, nLIN, nWOLF
+  DA nRIO, nMARA, nTANK, nKENJI, nZED, nFOX, nLIN, nWOLF, cartname
 OATHNAMES:
   DA sGUARD, sFISTS, sSKY, sSTAND
 
@@ -4066,14 +6792,42 @@ sARCADE:                ; "1P ARCADE"
   DB '1', 'P', ' ', 'A', 'R', 'C', 'A', 'D', 'E', 0
 sVERSUS:                ; "2P VERSUS"
   DB '2', 'P', ' ', 'V', 'E', 'R', 'S', 'U', 'S', 0
+sTRAIN:         ; "TRAINING"
+  DB 'T', 'R', 'A', 'I', 'N', 'I', 'N', 'G', 0
+sTSEL1:         ; "PICK YOUR FIGHTER"
+  DB 'P', 'I', 'C', 'K', ' ', 'Y', 'O', 'U', 'R', ' ', 'F', 'I', 'G', 'H', 'T', 'E', 'R', 0
+sTSEL2:         ; "NOW PICK THE DUMMY"
+  DB 'N', 'O', 'W', ' ', 'P', 'I', 'C', 'K', ' ', 'T', 'H', 'E', ' ', 'D', 'U', 'M', 'M', 'Y', 0
+sDUMMY:         ; "DUMMY"
+  DB 'D', 'U', 'M', 'M', 'Y', 0
+sDMG:           ; "DAMAGE"
+  DB 'D', 'A', 'M', 'A', 'G', 'E', 0
+sTHINT:         ; "START DUMMY  HOLD START QUIT"
+  DB 'S', 'T', 'A', 'R', 'T', ' ', 'D', 'U', 'M', 'M', 'Y', ' ', ' ', 'H', 'O', 'L', 'D', ' ', 'S', 'T', 'A', 'R', 'T', ' ', 'Q', 'U', 'I', 'T', 0
+sDSTAND:        ; "STAND"
+  DB 'S', 'T', 'A', 'N', 'D', 0
+sDCROUCH:       ; "CROUCH"
+  DB 'C', 'R', 'O', 'U', 'C', 'H', 0
+sDJUMP:         ; "JUMP"
+  DB 'J', 'U', 'M', 'P', 0
+sDGUARD:        ; "GUARD"
+  DB 'G', 'U', 'A', 'R', 'D', 0
+sDCPU:          ; "CPU"
+  DB 'C', 'P', 'U', 0
+sDREC:          ; "RECORD"
+  DB 'R', 'E', 'C', 'O', 'R', 'D', 0
+sDPLAY:         ; "PLAY"
+  DB 'P', 'L', 'A', 'Y', 0
+sDEMO:          ; "DEMO   PRESS START"
+  DB 'D', 'E', 'M', 'O', 32, 32, 32, 'P', 'R', 'E', 'S', 'S', 32, 'S', 'T', 'A', 'R', 'T', 0
 sSTART:                ; "PRESS START"
   DB 'P', 'R', 'E', 'S', 'S', ' ', 'S', 'T', 'A', 'R', 'T', 0
 sCREATE1:                ; "P1 CREATE YOUR FIGHTER"
   DB 'P', '1', ' ', 'C', 'R', 'E', 'A', 'T', 'E', ' ', 'Y', 'O', 'U', 'R', ' ', 'F', 'I', 'G', 'H', 'T', 'E', 'R', 0
 sCREATE2:                ; "P2 CREATE YOUR FIGHTER"
   DB 'P', '2', ' ', 'C', 'R', 'E', 'A', 'T', 'E', ' ', 'Y', 'O', 'U', 'R', ' ', 'F', 'I', 'G', 'H', 'T', 'E', 'R', 0
-sSTARTD:                ; "START TO FIGHT"
-  DB 'S', 'T', 'A', 'R', 'T', ' ', 'T', 'O', ' ', 'F', 'I', 'G', 'H', 'T', 0
+sSTARTD:                ; "START  DONE"
+  DB 'S', 'T', 'A', 'R', 'T', ' ', ' ', 'D', 'O', 'N', 'E', 0
 sSWEAR:                ; "SWEAR AN OATH"
   DB 'S', 'W', 'E', 'A', 'R', ' ', 'A', 'N', ' ', 'O', 'A', 'T', 'H', 0
 sOA1:                ; "A  NO GUARD"
@@ -4122,6 +6876,131 @@ sSKY:                ; "SKY STRIKER"
   DB 'S', 'K', 'Y', ' ', 'S', 'T', 'R', 'I', 'K', 'E', 'R', 0
 sSTAND:                ; "STAND FAST"
   DB 'S', 'T', 'A', 'N', 'D', ' ', 'F', 'A', 'S', 'T', 0
+; ---- the roster: main then alternate colours (skin, hair, top, legs, shoes) per fighter ----
+CHARCOL:
+  DB 0, 0, 0, 0, 0, 1, 2, 8, 1, 1        ; RIO
+  DB 1, 4, 2, 3, 1, 0, 7, 8, 5, 6        ; MARA
+  DB 3, 1, 6, 1, 3, 2, 5, 1, 6, 2        ; TANK
+  DB 2, 1, 1, 7, 0, 0, 0, 7, 1, 4        ; KENJI
+  DB 1, 4, 6, 1, 2, 3, 1, 5, 7, 7        ; ZED
+  DB 3, 1, 7, 2, 1, 4, 3, 3, 9, 5        ; FOX
+  DB 1, 1, 8, 6, 6, 0, 2, 1, 3, 3        ; LIN
+  DB 4, 5, 5, 8, 0, 5, 1, 9, 4, 3        ; WOLF
+EPITAB:
+  DA sEPI0, sEPI1, sEPI2, sEPI3, sEPI4, sEPI5, sEPI6, sEPI7
+MOVETAB:                               ; three special lines per fighter
+  DA sMV00, sMV01, sMV02
+  DA sMV10, sMV11, sMV12
+  DA sMV20, sMV21, sMV22
+  DA sMV30, sMV31, sMV32
+  DA sMV40, sMV41, sMV42
+  DA sMV50, sMV51, sMV52
+  DA sMV60, sMV61, sMV62
+  DA sMV70, sMV71, sMV72
+QUOTETAB:
+  DA sQ0, sQ1, sQ2, sQ3, sQ4, sQ5, sQ6, sQ7
+sEPI0:           ; "THE WANDERER"
+  DB 'T', 'H', 'E', ' ', 'W', 'A', 'N', 'D', 'E', 'R', 'E', 'R', 0
+sEPI1:           ; "THE SWIFT"
+  DB 'T', 'H', 'E', ' ', 'S', 'W', 'I', 'F', 'T', 0
+sEPI2:           ; "THE BULWARK"
+  DB 'T', 'H', 'E', ' ', 'B', 'U', 'L', 'W', 'A', 'R', 'K', 0
+sEPI3:           ; "THE EMBER"
+  DB 'T', 'H', 'E', ' ', 'E', 'M', 'B', 'E', 'R', 0
+sEPI4:           ; "THE SHADE"
+  DB 'T', 'H', 'E', ' ', 'S', 'H', 'A', 'D', 'E', 0
+sEPI5:           ; "THE BRAWLER"
+  DB 'T', 'H', 'E', ' ', 'B', 'R', 'A', 'W', 'L', 'E', 'R', 0
+sEPI6:           ; "THE TIDE"
+  DB 'T', 'H', 'E', ' ', 'T', 'I', 'D', 'E', 0
+sEPI7:           ; "THE IRON WALL"
+  DB 'T', 'H', 'E', ' ', 'I', 'R', 'O', 'N', ' ', 'W', 'A', 'L', 'L', 0
+sMV00:           ; "QCF+P SEAL BOLT"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'S', 'E', 'A', 'L', ' ', 'B', 'O', 'L', 'T', 0
+sMV01:           ; "DP+P  PALM RISE"
+  DB 'D', 'P', 43, 'P', ' ', ' ', 'P', 'A', 'L', 'M', ' ', 'R', 'I', 'S', 'E', 0
+sMV02:           ; "QCB+P GATE RUSH"
+  DB 'Q', 'C', 'B', 43, 'P', ' ', 'G', 'A', 'T', 'E', ' ', 'R', 'U', 'S', 'H', 0
+sMV10:           ; "QCF+P NEEDLE BOLT"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'N', 'E', 'E', 'D', 'L', 'E', ' ', 'B', 'O', 'L', 'T', 0
+sMV11:           ; "QCB+K GALE WHEEL"
+  DB 'Q', 'C', 'B', 43, 'K', ' ', 'G', 'A', 'L', 'E', ' ', 'W', 'H', 'E', 'E', 'L', 0
+sMV12:           ; "DP+K  LARK RISE"
+  DB 'D', 'P', 43, 'K', ' ', ' ', 'L', 'A', 'R', 'K', ' ', 'R', 'I', 'S', 'E', 0
+sMV20:           ; "QCF+P RAM CHARGE"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'R', 'A', 'M', ' ', 'C', 'H', 'A', 'R', 'G', 'E', 0
+sMV21:           ; "DP+P  BELL SMASH"
+  DB 'D', 'P', 43, 'P', ' ', ' ', 'B', 'E', 'L', 'L', ' ', 'S', 'M', 'A', 'S', 'H', 0
+sMV22:           ; "QCB+P GATE CRUSHER"
+  DB 'Q', 'C', 'B', 43, 'P', ' ', 'G', 'A', 'T', 'E', ' ', 'C', 'R', 'U', 'S', 'H', 'E', 'R', 0
+sMV30:           ; "QCF+P EMBER BOLT"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'E', 'M', 'B', 'E', 'R', ' ', 'B', 'O', 'L', 'T', 0
+sMV31:           ; "DP+P  PALM RISE"
+  DB 'D', 'P', 43, 'P', ' ', ' ', 'P', 'A', 'L', 'M', ' ', 'R', 'I', 'S', 'E', 0
+sMV32:           ; "QCB+K GALE WHEEL"
+  DB 'Q', 'C', 'B', 43, 'K', ' ', 'G', 'A', 'L', 'E', ' ', 'W', 'H', 'E', 'E', 'L', 0
+sMV40:           ; "QCF+P NEEDLE BOLT"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'N', 'E', 'E', 'D', 'L', 'E', ' ', 'B', 'O', 'L', 'T', 0
+sMV41:           ; "QCB+P GATE RUSH"
+  DB 'Q', 'C', 'B', 43, 'P', ' ', 'G', 'A', 'T', 'E', ' ', 'R', 'U', 'S', 'H', 0
+sMV42:           ; "QCB+K GALE WHEEL"
+  DB 'Q', 'C', 'B', 43, 'K', ' ', 'G', 'A', 'L', 'E', ' ', 'W', 'H', 'E', 'E', 'L', 0
+sMV50:           ; "DP+P  PALM RISE"
+  DB 'D', 'P', 43, 'P', ' ', ' ', 'P', 'A', 'L', 'M', ' ', 'R', 'I', 'S', 'E', 0
+sMV51:           ; "QCB+P GATE RUSH"
+  DB 'Q', 'C', 'B', 43, 'P', ' ', 'G', 'A', 'T', 'E', ' ', 'R', 'U', 'S', 'H', 0
+sMV52:           ; "QCB+K GALE WHEEL"
+  DB 'Q', 'C', 'B', 43, 'K', ' ', 'G', 'A', 'L', 'E', ' ', 'W', 'H', 'E', 'E', 'L', 0
+sMV60:           ; "QCF+P SEAL BOLT"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'S', 'E', 'A', 'L', ' ', 'B', 'O', 'L', 'T', 0
+sMV61:           ; "QCB+K GALE WHEEL"
+  DB 'Q', 'C', 'B', 43, 'K', ' ', 'G', 'A', 'L', 'E', ' ', 'W', 'H', 'E', 'E', 'L', 0
+sMV62:           ; "DP+K  LARK RISE"
+  DB 'D', 'P', 43, 'K', ' ', ' ', 'L', 'A', 'R', 'K', ' ', 'R', 'I', 'S', 'E', 0
+sMV70:           ; "QCF+P RAM CHARGE"
+  DB 'Q', 'C', 'F', 43, 'P', ' ', 'R', 'A', 'M', ' ', 'C', 'H', 'A', 'R', 'G', 'E', 0
+sMV71:           ; "DP+P  PALM RISE"
+  DB 'D', 'P', 43, 'P', ' ', ' ', 'P', 'A', 'L', 'M', ' ', 'R', 'I', 'S', 'E', 0
+sMV72:           ; "QCB+P GATE CRUSHER"
+  DB 'Q', 'C', 'B', 43, 'P', ' ', 'G', 'A', 'T', 'E', ' ', 'C', 'R', 'U', 'S', 'H', 'E', 'R', 0
+sQ0:             ; "THE ROAD IS LONG. YOU WERE ONE STEP."
+  DB 'T', 'H', 'E', ' ', 'R', 'O', 'A', 'D', ' ', 'I', 'S', ' ', 'L', 'O', 'N', 'G', '.', ' ', 'Y', 'O', 'U', ' ', 'W', 'E', 'R', 'E', ' ', 'O', 'N', 'E', ' ', 'S', 'T', 'E', 'P', '.', 0
+sQ1:             ; "TOO SLOW. I WAS GONE BEFORE YOU SWUNG."
+  DB 'T', 'O', 'O', ' ', 'S', 'L', 'O', 'W', '.', ' ', 'I', ' ', 'W', 'A', 'S', ' ', 'G', 'O', 'N', 'E', ' ', 'B', 'E', 'F', 'O', 'R', 'E', ' ', 'Y', 'O', 'U', ' ', 'S', 'W', 'U', 'N', 'G', '.', 0
+sQ2:             ; "WALLS DO NOT MOVE. NEITHER DO I."
+  DB 'W', 'A', 'L', 'L', 'S', ' ', 'D', 'O', ' ', 'N', 'O', 'T', ' ', 'M', 'O', 'V', 'E', '.', ' ', 'N', 'E', 'I', 'T', 'H', 'E', 'R', ' ', 'D', 'O', ' ', 'I', '.', 0
+sQ3:             ; "A SPARK BECOMES A FIRE. REMEMBER THAT."
+  DB 'A', ' ', 'S', 'P', 'A', 'R', 'K', ' ', 'B', 'E', 'C', 'O', 'M', 'E', 'S', ' ', 'A', ' ', 'F', 'I', 'R', 'E', '.', ' ', 'R', 'E', 'M', 'E', 'M', 'B', 'E', 'R', ' ', 'T', 'H', 'A', 'T', '.', 0
+sQ4:             ; "YOU NEVER SAW WHERE I CAME FROM."
+  DB 'Y', 'O', 'U', ' ', 'N', 'E', 'V', 'E', 'R', ' ', 'S', 'A', 'W', ' ', 'W', 'H', 'E', 'R', 'E', ' ', 'I', ' ', 'C', 'A', 'M', 'E', ' ', 'F', 'R', 'O', 'M', '.', 0
+sQ5:             ; "GET UP. I WAS JUST WARMING UP."
+  DB 'G', 'E', 'T', ' ', 'U', 'P', '.', ' ', 'I', ' ', 'W', 'A', 'S', ' ', 'J', 'U', 'S', 'T', ' ', 'W', 'A', 'R', 'M', 'I', 'N', 'G', ' ', 'U', 'P', '.', 0
+sQ6:             ; "THE TIDE COMES BACK. SO WILL I."
+  DB 'T', 'H', 'E', ' ', 'T', 'I', 'D', 'E', ' ', 'C', 'O', 'M', 'E', 'S', ' ', 'B', 'A', 'C', 'K', '.', ' ', 'S', 'O', ' ', 'W', 'I', 'L', 'L', ' ', 'I', '.', 0
+sQ7:             ; "IRON KEEPS ITS WORD. DID YOU?"
+  DB 'I', 'R', 'O', 'N', ' ', 'K', 'E', 'E', 'P', 'S', ' ', 'I', 'T', 'S', ' ', 'W', 'O', 'R', 'D', '.', ' ', 'D', 'I', 'D', ' ', 'Y', 'O', 'U', '?', 0
+sCHOOSE:         ; "CHOOSE YOUR FIGHTER"
+  DB 'C', 'H', 'O', 'O', 'S', 'E', ' ', 'Y', 'O', 'U', 'R', ' ', 'F', 'I', 'G', 'H', 'T', 'E', 'R', 0
+sSELHINT:        ; "A MAIN  B ALT  Y TAILOR"
+  DB 'A', ' ', 'M', 'A', 'I', 'N', ' ', ' ', 'B', ' ', 'A', 'L', 'T', ' ', ' ', 'Y', ' ', 'T', 'A', 'I', 'L', 'O', 'R', 0
+sBONUS1:         ; "BONUS STAGE"
+  DB 'B', 'O', 'N', 'U', 'S', ' ', 'S', 'T', 'A', 'G', 'E', 0
+sBONUS2:         ; "WRECK THE CART!"
+  DB 'W', 'R', 'E', 'C', 'K', ' ', 'T', 'H', 'E', ' ', 'C', 'A', 'R', 'T', '!', 0
+sWRECKED:        ; "WRECKED!"
+  DB 'W', 'R', 'E', 'C', 'K', 'E', 'D', '!', 0
+sBONUSPTS:       ; "BONUS"
+  DB 'B', 'O', 'N', 'U', 'S', 0
+cartname:        ; "CART"
+  DB 'C', 'A', 'R', 'T', 0
+sONE:
+  DB '1', 0
+sTWO:
+  DB '2', 0
+sTECH:                ; "TECH"
+  DB 'T', 'E', 'C', 'H', 0
+sHITS:                ; " HITS"
+  DB ' ', 'H', 'I', 'T', 'S', 0
 sSURGE:                ; "OATH SURGE!"
   DB 'O', 'A', 'T', 'H', ' ', 'S', 'U', 'R', 'G', 'E', '!', 0
 sYOUWIN:                ; "YOU WIN"
@@ -4182,6 +7061,8 @@ charpal:
   INCBIN "../streetbrawl/charpal.bin"
 bodies:
   INCBIN "bodies.bin"
+cartdata:                ; 16-word palette, then 3 cart frames
+  INCBIN "cart.bin"
 tiledata:
   INCBIN "tiles.bin"
 tiledataend:
